@@ -1,0 +1,10 @@
+{
+  "name": "sol_icp_poc",
+  "version": "1.0.0",
+  "dependencies": {
+    "@dfinity/agent": "^3.1.0"
+  },
+  "scripts": {
+    "build": "cd src/sol_icp_poc_frontend/assets && DFX_NETWORK=${DFX_NETWORK:-ic} CANISTER_ID_SOL_ICP_POC_BACKEND=${CANISTER_ID_SOL_ICP_POC_BACKEND:-f4kcz-fqaaa-aaaap-an3hq-cai} npm install && npm run build"
+  }
+}

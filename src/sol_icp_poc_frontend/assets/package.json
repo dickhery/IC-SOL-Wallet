@@ -1,0 +1,23 @@
+{
+  "name": "assets",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "npx esbuild main.js --bundle --outfile=main.bundle.js --format=esm --platform=browser --minify --define:process.env.DFX_NETWORK=\\\"$DFX_NETWORK\\\" --define:process.env.CANISTER_ID_SOL_ICP_POC_BACKEND=\\\"$CANISTER_ID_SOL_ICP_POC_BACKEND\\\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@dfinity/agent": "^3.1.0",
+    "@dfinity/auth-client": "^3.1.0",
+    "@dfinity/candid": "^3.1.0",
+    "@dfinity/identity": "^3.1.0",
+    "@dfinity/principal": "^3.1.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0"
+  }
+}

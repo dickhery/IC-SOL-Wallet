@@ -1,0 +1,15 @@
+service : {
+  "whoami": () -> (text) query;
+  "link_sol_pubkey": (text, vec nat8) -> (text);
+  "unlink_sol_pubkey": () -> (text);
+
+  "get_deposit_address": (text) -> (text) query;
+  "get_balance": (text) -> (nat64);
+  "transfer": (text, nat64, text, vec nat8, nat64) -> (text);
+  "get_nonce": (text) -> (nat64) query;
+  "get_pid": (text) -> (text) query;
+
+  "get_sol_deposit_address": (text) -> (text);
+  "get_sol_balance": (text) -> (nat64);
+  "transfer_sol": (text, nat64, text, vec nat8, nat64) -> (text);
+}

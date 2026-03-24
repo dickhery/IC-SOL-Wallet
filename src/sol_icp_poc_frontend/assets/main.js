@@ -1,64 +1,152 @@
-// src/sol_icp_poc_frontend/assets/main.js
 import { Actor, HttpAgent } from "@dfinity/agent";
 import { AuthClient } from "@dfinity/auth-client";
 import idlFactory from "./sol_icp_poc_backend.idl.js";
 
-const host = process.env.DFX_NETWORK === "ic" ? "https://ic0.app" : "http://localhost:4943";
-const canisterId = process.env.CANISTER_ID_SOL_ICP_POC_BACKEND;
+const isMainnet = process.env.DFX_NETWORK === "ic";
+const host = isMainnet ? "https://icp-api.io" : "http://127.0.0.1:4943";
+const canisterId =
+  process.env.CANISTER_ID_SOL_ICP_POC_BACKEND || "f4kcz-fqaaa-aaaap-an3hq-cai";
+
+const serviceFeeICP = 0.0001;
+const serviceFeeSolICP = 0.0002;
+const icpLedgerFee = 0.0001;
+const networkFeeICP = 0.0002;
+const solanaFeeApprox = 0.000005;
+const serviceFeeE8s = BigInt(Math.round(serviceFeeICP * 1e8));
+const serviceFeeSolE8s = BigInt(Math.round(serviceFeeSolICP * 1e8));
+const refreshCooldownMs = 10_000;
+const textEncoder = new TextEncoder();
 
 let authClient = null;
 let identity = null;
 let agent = null;
 let actor = null;
-
-let authMode = null; // "ii" | "phantom"
+let authMode = "ii";
 let solPubkey = null;
+let lastIcpRefreshMs = 0;
+let lastSolRefreshMs = 0;
+let icpRefreshInFlight = false;
+let solRefreshInFlight = false;
+let sendingIcp = false;
+let sendingSol = false;
 
-// ---- UI helpers ----
-function setVisible(id, visible) {
-  document.getElementById(id).style.display = visible ? "block" : "none";
-}
-function uiSet(id, value) {
-  document.getElementById(id).innerText = value;
-}
-function alertSet(cls, msg) {
-  const el = document.getElementById("alerts");
-  el.className = cls;
-  el.textContent = msg || "";
-}
-const showOk = (m) => alertSet("ok", m);
-const showWarn = (m) => alertSet("warn", m);
-const showErr = (m) => alertSet("err", m);
-const showMuted = (m) => alertSet("muted", m);
+const $ = (id) => document.getElementById(id);
 
-function normalizeAgentError(e) {
-  const s = (e?.message || String(e || "")).trim();
-  if (/Request timed out after/i.test(s)) {
-    return "Request timed out. This may be due to network delays or consensus issues. The operation may still succeed—refresh balances in a few seconds.";
+function setText(id, value) {
+  const el = $(id);
+  if (el) {
+    el.textContent = value ?? "";
   }
-  if (/processing/i.test(s) && /Request ID:/i.test(s)) {
-    return "The network is processing the call. Refresh balances shortly.";
-  }
-  if (/inconsistent/i.test(s) || /consensus/i.test(s)) {
-    return "Network variance prevented consensus. Retry the operation.";
-  }
-  if (/blockhash/i.test(s)) {
-    return "Blockhash retrieval failed; network may be busy. Retry.";
-  }
-  return s;
 }
 
-function friendlyTry(fn, onErr) {
-  return fn().catch((e) => {
-    const msg = normalizeAgentError(e);
-    if (onErr) onErr(msg, e);
-    else showErr(msg);
-    throw e; // keep behavior for upstream catch/finally
+function setBadge(id, label, tone) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = label;
+  el.className = `status-badge ${tone}`;
+}
+
+function setModeButtonState() {
+  $("mode_ii").classList.toggle("is-active", authMode === "ii");
+  $("mode_phantom").classList.toggle("is-active", authMode === "phantom");
+  setText(
+    "mode_status",
+    authMode === "ii"
+      ? "Active wallet: Internet Identity session"
+      : "Active wallet: Phantom-derived wallet"
+  );
+}
+
+function alertSet(tone, message) {
+  const el = $("alerts");
+  el.className = tone ? `notice ${tone}` : "notice";
+  el.textContent = message || "";
+}
+
+function showOk(message) {
+  alertSet("ok", message);
+}
+
+function showWarn(message) {
+  alertSet("warn", message);
+}
+
+function showErr(message) {
+  alertSet("err", message);
+}
+
+function showMuted(message) {
+  alertSet("muted", message);
+}
+
+function resetWalletDisplay(reason, hint) {
+  setText("pid", reason);
+  setText("deposit", "ICP deposit address: waiting for authentication");
+  setText("balance", "ICP Balance: --");
+  setText("sol_deposit", "SOL deposit address: waiting for authentication");
+  setText("sol_balance", "SOL Balance: --");
+  setText("wallet_hint", hint);
+}
+
+function resetLatestTransaction() {
+  const latest = $("latest-tx");
+  latest.className = "transaction-card muted";
+  latest.textContent = "No transactions yet.";
+}
+
+function renderLatestTransaction(message, tone = "muted", href = null, hrefLabel = null) {
+  const latest = $("latest-tx");
+  latest.className = `transaction-card ${tone}`;
+  latest.textContent = "";
+
+  const text = document.createElement("span");
+  text.textContent = message;
+  latest.append(text);
+
+  if (href && hrefLabel) {
+    latest.append(" ");
+    const link = document.createElement("a");
+    link.href = href;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = hrefLabel;
+    latest.append(link);
+  }
+}
+
+function normalizeAgentError(error) {
+  const text = (error?.message || String(error || "")).trim();
+  if (/Authentication required/i.test(text)) {
+    return "Sign in with Internet Identity before using the II-managed wallet.";
+  }
+  if (/Request timed out after/i.test(text)) {
+    return "The request timed out. The network may still be processing it, so refresh again in a few seconds.";
+  }
+  if (/processing/i.test(text) && /Request ID:/i.test(text)) {
+    return "The network is still processing the call. Refresh again shortly.";
+  }
+  if (/inconsistent/i.test(text) || /consensus/i.test(text)) {
+    return "The network could not reach consensus for that response. Please retry.";
+  }
+  if (/blockhash/i.test(text)) {
+    return "A fresh Solana blockhash was not available. Please retry.";
+  }
+  return text;
+}
+
+function friendlyTry(fn, onError) {
+  return fn().catch((error) => {
+    const message = normalizeAgentError(error);
+    if (onError) {
+      onError(message, error);
+    } else {
+      showErr(message);
+    }
+    throw error;
   });
 }
 
-// Add timeout wrapper for calls
-async function withTimeout(promise, ms = 900000) {  // 15 minutes
+async function withTimeout(promise, ms = 900000) {
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
     timeoutId = setTimeout(() => reject(new Error(`Timed out after ${ms} ms`)), ms);
@@ -66,499 +154,770 @@ async function withTimeout(promise, ms = 900000) {  // 15 minutes
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
 }
 
+function getIdentityProviderUrl() {
+  return isMainnet
+    ? "https://id.ai"
+    : "http://rdmx6-jaaaa-aaaaa-aaadq-cai.localhost:4943";
+}
+
+async function initAuthIfNeeded() {
+  if (!authClient) {
+    authClient = await AuthClient.create();
+  }
+}
+
 async function makeAgentAndActor() {
   agent = new HttpAgent({ host, identity: identity ?? undefined });
-  if (process.env.DFX_NETWORK !== "ic") {
+  if (!isMainnet) {
     await agent.fetchRootKey();
   }
   actor = Actor.createActor(idlFactory, { agent, canisterId });
 }
 
-async function initAuthIfNeeded() {
-  if (!authClient) authClient = await AuthClient.create();
+function getProvider(promptInstall = false) {
+  const provider = window.phantom?.solana;
+  if (provider?.isPhantom) {
+    return provider;
+  }
+  if (promptInstall) {
+    window.open("https://phantom.app/", "_blank", "noopener,noreferrer");
+  }
+  return null;
 }
 
-// ---- Phantom provider ----
-function getProvider() {
-  if ("phantom" in window) {
-    const provider = window.phantom?.solana;
-    if (provider?.isPhantom) return provider;
+function bindProviderEvents() {
+  const provider = getProvider();
+  if (!provider || provider.__walletUiBound) {
+    return;
   }
-  window.open("https://phantom.app/", "_blank");
+
+  provider.__walletUiBound = true;
+  provider.on("disconnect", () => {
+    solPubkey = null;
+    renderConnectionState();
+    if (authMode === "phantom") {
+      resetWalletDisplay(
+        "Phantom public key: connect your wallet to load the Phantom-managed account.",
+        "Connect Phantom to derive the shared ICP and SOL wallet from your public key."
+      );
+    }
+  });
 }
-const provider = getProvider();
 
-// ---- fees & constants ----
-const serviceFeeICP = 0.0001;         // ICP fee for ICP transfers
-const serviceFeeSolICP = 0.0002;      // ICP fee for SOL ops
-const icpLedgerFee = 0.0001;          // ICP ledger fee to move service fee
-const networkFeeICP = 0.0002;         // two ledger ops in ICP send flow
-const solanaFeeApprox = 0.000005;     // SOL fee approx
-const serviceFeeE8s = BigInt(Math.round(serviceFeeICP * 1e8));
-const serviceFeeSolE8s = BigInt(Math.round(serviceFeeSolICP * 1e8));
+function renderConnectionState() {
+  setBadge("ii_badge", identity ? "Connected" : "Offline", identity ? "ok" : "muted");
+  setBadge(
+    "phantom_badge",
+    solPubkey ? "Connected" : "Offline",
+    solPubkey ? "ok" : "muted"
+  );
 
-// ---- Throttle state for refreshes ----
-let lastSolRefreshMs = 0;
-let solRefreshInFlight = false;
-let lastIcpRefreshMs = 0;
-let icpRefreshInFlight = false;
-const COOLDOWN_MS = 10_000;
+  setText(
+    "ii_status",
+    identity
+      ? "Internet Identity session ready."
+      : "Sign in with Internet Identity to unlock the II-managed wallet."
+  );
+  setText(
+    "status",
+    solPubkey
+      ? "Phantom connected on Solana mainnet."
+      : "Connect Phantom to unlock the Phantom-managed wallet."
+  );
+  setText("pubkey", solPubkey ? `Phantom public key: ${solPubkey}` : "");
 
-// Shared refresh that respects auth mode + cooldowns
-async function refreshSolBalance(force = false) {
-  const now = Date.now();
-  if (!force && (now - lastSolRefreshMs) < COOLDOWN_MS) {
-    const wait = Math.ceil((COOLDOWN_MS - (now - lastSolRefreshMs)) / 1000);
-    showWarn(`Please wait ~${wait}s before refreshing SOL again.`);
+  if (identity && solPubkey) {
+    setText(
+      "link_status",
+      "Both auth methods are connected. Link them if you want II mode to control the Phantom-derived wallet too."
+    );
+  } else if (identity) {
+    setText("link_status", "Connect Phantom to enable wallet linking.");
+  } else {
+    setText(
+      "link_status",
+      "Sign in with Internet Identity and connect Phantom to link the wallet contexts."
+    );
+  }
+
+  setModeButtonState();
+}
+
+async function restoreIiSession() {
+  await initAuthIfNeeded();
+  if (await authClient.isAuthenticated()) {
+    identity = authClient.getIdentity();
+  }
+}
+
+async function restoreTrustedPhantomConnection() {
+  const provider = getProvider();
+  if (!provider) return;
+
+  bindProviderEvents();
+  try {
+    const response = await provider.connect({ onlyIfTrusted: true });
+    solPubkey = response?.publicKey?.toString?.() || null;
+  } catch {
+    solPubkey = null;
+  }
+}
+
+async function ensureActor() {
+  if (!actor) {
+    await makeAgentAndActor();
+  }
+}
+
+async function hydrateIiWallet(forceBalances = true) {
+  if (!identity) {
+    resetWalletDisplay(
+      "Internet Identity principal: sign in to load your wallet.",
+      "II mode can manage its own derived wallet, or a linked Phantom-derived wallet after linking."
+    );
     return;
   }
-  if (solRefreshInFlight) {
-    showMuted("Refreshing SOL…");
-    return;
-  }
-  solRefreshInFlight = true;
-  const button = document.getElementById("get_sol");
-  if (button) { button.disabled = true; }
+
+  await makeAgentAndActor();
 
   try {
-    let lam;
-    if (authMode === "ii") {
-      lam = await withTimeout(friendlyTry(() => actor.get_sol_balance_ii(), (m) => showWarn(m)));
-    } else if (authMode === "phantom") {
-      if (!solPubkey) return showWarn("Connect Phantom first");
-      lam = await withTimeout(friendlyTry(() => actor.get_sol_balance(solPubkey), (m) => showWarn(m)));
-    } else {
-      showWarn("Pick an auth mode to refresh SOL.");
-      return;
+    const principal = await actor.whoami();
+    const [deposit, solDeposit] = await Promise.all([
+      friendlyTry(() => actor.get_deposit_address_ii()),
+      friendlyTry(() => actor.get_sol_deposit_address_ii()),
+    ]);
+
+    setText("pid", `Internet Identity principal: ${principal}`);
+    setText("deposit", `ICP deposit address: ${deposit}`);
+    setText("sol_deposit", `SOL deposit address: ${solDeposit}`);
+    setText(
+      "wallet_hint",
+      "If this II session is linked to Phantom, the addresses above are already pointing at that linked wallet."
+    );
+
+    if (forceBalances) {
+      await refreshBothBalances(true, true);
     }
-    uiSet("sol_balance", `SOL Balance: ${(Number(lam)/1e9).toFixed(9)} SOL`);
-    showMuted("SOL balance updated.");
-    lastSolRefreshMs = Date.now();
-  } catch (e) {
-    if (String(e).includes("Timed out")) {
-      showWarn("SOL refresh timed out. Network may be slow—try again in a minute.");
-    } else {
-      showErr(normalizeAgentError(e));
-    }
-  } finally {
-    solRefreshInFlight = false;
-    if (button) { button.disabled = false; }
+  } catch (error) {
+    showWarn(normalizeAgentError(error));
   }
 }
 
-async function refreshIcpBalance(force = false) {
-  const now = Date.now();
-  if (!force && (now - lastIcpRefreshMs) < COOLDOWN_MS) {
-    const wait = Math.ceil((COOLDOWN_MS - (now - lastIcpRefreshMs)) / 1000);
-    showWarn(`Please wait ~${wait}s before refreshing ICP again.`);
+async function hydratePhantomWallet(forceBalances = true) {
+  if (!solPubkey) {
+    resetWalletDisplay(
+      "Phantom public key: connect your wallet to load the Phantom-managed account.",
+      "Phantom mode derives a shared ICP subaccount and a Solana address from your wallet public key."
+    );
     return;
+  }
+
+  await ensureActor();
+
+  try {
+    const [deposit, solDeposit] = await Promise.all([
+      friendlyTry(() => actor.get_deposit_address(solPubkey)),
+      friendlyTry(() => actor.get_sol_deposit_address(solPubkey)),
+    ]);
+
+    setText("pid", `Phantom public key: ${solPubkey}`);
+    setText("deposit", `ICP deposit address: ${deposit}`);
+    setText("sol_deposit", `SOL deposit address: ${solDeposit}`);
+    setText(
+      "wallet_hint",
+      "Use Phantom signatures for outbound transfers, or link this wallet to II so the II session can manage it too."
+    );
+
+    if (forceBalances) {
+      await refreshBothBalances(true, true);
+    }
+  } catch (error) {
+    showWarn(normalizeAgentError(error));
+  }
+}
+
+async function hydrateActiveWallet(forceBalances = true) {
+  renderConnectionState();
+  if (authMode === "ii") {
+    await hydrateIiWallet(forceBalances);
+  } else {
+    await hydratePhantomWallet(forceBalances);
+  }
+}
+
+async function refreshIcpBalance(force = false, quiet = false) {
+  const now = Date.now();
+  if (!force && now - lastIcpRefreshMs < refreshCooldownMs) {
+    const waitSeconds = Math.ceil((refreshCooldownMs - (now - lastIcpRefreshMs)) / 1000);
+    if (!quiet) {
+      showWarn(`Please wait about ${waitSeconds}s before refreshing ICP again.`);
+    }
+    return null;
   }
   if (icpRefreshInFlight) {
-    showMuted("Refreshing ICP…");
-    return;
+    return null;
   }
+
+  if (authMode === "ii" && !identity) {
+    setText("balance", "ICP Balance: --");
+    if (!quiet) {
+      showWarn("Sign in with Internet Identity before refreshing the II-managed ICP balance.");
+    }
+    return null;
+  }
+  if (authMode === "phantom" && !solPubkey) {
+    setText("balance", "ICP Balance: --");
+    if (!quiet) {
+      showWarn("Connect Phantom before refreshing the Phantom-managed ICP balance.");
+    }
+    return null;
+  }
+
   icpRefreshInFlight = true;
-  const button = document.getElementById("refresh_icp");
-  if (button) { button.disabled = true; }
+  $("refresh_icp").disabled = true;
 
   try {
-    let e8s;
-    if (authMode === "ii") {
-      e8s = await withTimeout(friendlyTry(() => actor.get_balance_ii(), (m) => showWarn(m)));
-    } else if (authMode === "phantom") {
-      if (!solPubkey) return showWarn("Connect Phantom first");
-      e8s = await withTimeout(friendlyTry(() => actor.get_balance(solPubkey), (m) => showWarn(m)));
-    } else {
-      showWarn("Pick an auth mode to refresh ICP.");
-      return;
-    }
-    uiSet("balance", `ICP Balance: ${(Number(e8s)/1e8).toFixed(8)} ICP`);
-    showMuted("ICP balance updated.");
+    await ensureActor();
+    const e8s =
+      authMode === "ii"
+        ? await withTimeout(
+            friendlyTry(() => actor.get_balance_ii(), (message) => !quiet && showWarn(message))
+          )
+        : await withTimeout(
+            friendlyTry(() => actor.get_balance(solPubkey), (message) => !quiet && showWarn(message))
+          );
+    setText("balance", `ICP Balance: ${(Number(e8s) / 1e8).toFixed(8)} ICP`);
     lastIcpRefreshMs = Date.now();
-  } catch (e) {
-    if (String(e).includes("Timed out")) {
-      showWarn("ICP refresh timed out. Network may be slow—try again in a minute.");
-    } else {
-      showErr(normalizeAgentError(e));
+    if (!quiet) {
+      showMuted("ICP balance updated.");
     }
+    return e8s;
+  } catch (error) {
+    if (!quiet) {
+      showErr(normalizeAgentError(error));
+    }
+    return null;
   } finally {
     icpRefreshInFlight = false;
-    if (button) { button.disabled = false; }
+    $("refresh_icp").disabled = false;
   }
 }
 
-async function refreshBothBalances(force = false) {
+async function refreshSolBalance(force = false, quiet = false) {
+  const now = Date.now();
+  if (!force && now - lastSolRefreshMs < refreshCooldownMs) {
+    const waitSeconds = Math.ceil((refreshCooldownMs - (now - lastSolRefreshMs)) / 1000);
+    if (!quiet) {
+      showWarn(`Please wait about ${waitSeconds}s before refreshing SOL again.`);
+    }
+    return null;
+  }
+  if (solRefreshInFlight) {
+    return null;
+  }
+
+  if (authMode === "ii" && !identity) {
+    setText("sol_balance", "SOL Balance: --");
+    if (!quiet) {
+      showWarn("Sign in with Internet Identity before refreshing the II-managed SOL balance.");
+    }
+    return null;
+  }
+  if (authMode === "phantom" && !solPubkey) {
+    setText("sol_balance", "SOL Balance: --");
+    if (!quiet) {
+      showWarn("Connect Phantom before refreshing the Phantom-managed SOL balance.");
+    }
+    return null;
+  }
+
+  solRefreshInFlight = true;
+  $("get_sol").disabled = true;
+
+  try {
+    await ensureActor();
+    const lamports =
+      authMode === "ii"
+        ? await withTimeout(
+            friendlyTry(() => actor.get_sol_balance_ii(), (message) => !quiet && showWarn(message))
+          )
+        : await withTimeout(
+            friendlyTry(
+              () => actor.get_sol_balance(solPubkey),
+              (message) => !quiet && showWarn(message)
+            )
+          );
+    setText("sol_balance", `SOL Balance: ${(Number(lamports) / 1e9).toFixed(9)} SOL`);
+    lastSolRefreshMs = Date.now();
+    if (!quiet) {
+      showMuted("SOL balance updated.");
+    }
+    return lamports;
+  } catch (error) {
+    if (!quiet) {
+      showErr(normalizeAgentError(error));
+    }
+    return null;
+  } finally {
+    solRefreshInFlight = false;
+    $("get_sol").disabled = false;
+  }
+}
+
+async function refreshBothBalances(force = false, quiet = false) {
   await Promise.allSettled([
-    refreshIcpBalance(force),
-    refreshSolBalance(force),
+    refreshIcpBalance(force, quiet),
+    refreshSolBalance(force, quiet),
   ]);
 }
 
-// Clear all dynamic text/inputs except latest-tx
-function clearAllExceptTx() {
-  ["deposit", "balance", "sol_deposit", "sol_balance", "pid", "pubkey", "ii_status", "status"].forEach(id => uiSet(id, ""));
-  ["to", "amount", "to_sol", "amount_sol"].forEach(id => document.getElementById(id).value = "");
-}
+async function pollNonceForChange(initialNonce, maxAttempts = 12, intervalMs = 10000) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
 
-// ---- Auth mode switching ----
-function enterIiUi() {
-  setVisible("ii_block", true);
-  setVisible("phantom_block", false);
-  uiSet("mode_status", "Mode: Internet Identity");
-  alertSet("", "");
-}
-function enterPhantomUi() {
-  setVisible("phantom_block", true);
-  setVisible("ii_block", false);
-  uiSet("mode_status", "Mode: Phantom");
-  alertSet("", "");
-}
+    try {
+      await ensureActor();
+      const currentNonce =
+        authMode === "ii"
+          ? await actor.get_nonce_ii()
+          : await actor.get_nonce(solPubkey);
 
-document.getElementById("mode_ii").onclick = async () => {
-  clearAllExceptTx();
-  if (authMode === "phantom") {
-    try { await provider.disconnect(); } catch {}
-    solPubkey = null;
+      if (Number(currentNonce) > Number(initialNonce)) {
+        return true;
+      }
+    } catch {
+      // Ignore intermittent polling failures and continue.
+    }
+
+    showMuted(`Waiting for confirmation (${attempt}/${maxAttempts})...`);
   }
+
+  return false;
+}
+
+async function confirmAfterTimeout(initialNonce, assetType) {
+  showMuted(`${assetType} transfer submitted. Waiting for network confirmation...`);
+  const success = await pollNonceForChange(initialNonce);
+
+  if (success) {
+    renderLatestTransaction(
+      "Transfer successful (confirmed after delayed network response).",
+      "ok"
+    );
+    await refreshBothBalances(true, true);
+    showOk(`${assetType} transfer completed after a delayed confirmation.`);
+  } else {
+    showWarn(
+      `${assetType} transfer timed out and no nonce change was detected. Check the explorer or retry after a short wait.`
+    );
+  }
+}
+
+function displayResult(result) {
+  if (result.startsWith("Transfer successful")) {
+    const txidMatch = result.match(/txid (\S+)/);
+    if (txidMatch) {
+      renderLatestTransaction(
+        result,
+        "ok",
+        `https://explorer.solana.com/tx/${txidMatch[1]}?cluster=mainnet-beta`,
+        "View on Solana Explorer"
+      );
+    } else {
+      renderLatestTransaction(result, "ok");
+    }
+    return;
+  }
+
+  if (result.startsWith("Transfer failed") || result.startsWith("Send failed")) {
+    renderLatestTransaction(result, "err");
+    return;
+  }
+
+  if (/error/i.test(result)) {
+    renderLatestTransaction(result, "warn");
+    return;
+  }
+
+  renderLatestTransaction(result, "muted");
+}
+
+function validatePositiveAmount(rawValue, label) {
+  const parsed = Number.parseFloat(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid ${label} amount`);
+  }
+  return parsed;
+}
+
+$("mode_ii").onclick = async () => {
   authMode = "ii";
-  await initAuthIfNeeded();
-  await makeAgentAndActor();
-  enterIiUi();
+  await hydrateActiveWallet(false);
+  showMuted("Internet Identity mode selected.");
 };
 
-document.getElementById("mode_phantom").onclick = async () => {
-  clearAllExceptTx();
-  if (authMode === "ii") {
-    if (!authClient) await initAuthIfNeeded();
-    try { await authClient.logout(); } catch {}
-    identity = null;
-  }
+$("mode_phantom").onclick = async () => {
   authMode = "phantom";
-  await makeAgentAndActor();
-  enterPhantomUi();
+  await hydrateActiveWallet(false);
+  showMuted("Phantom mode selected.");
 };
 
-// ---- II login/logout ----
-document.getElementById("ii_login").onclick = async () => {
-  if (authMode !== "ii") return alert("Switch to Internet Identity mode first");
+$("ii_login").onclick = async () => {
   await initAuthIfNeeded();
-  const opts = { identityProvider: "https://identity.ic0.app" };
   authClient.login({
-    ...opts,
-    maxTimeToLive: BigInt(7) * BigInt(24*60*60*1_000_000_000),
+    identityProvider: getIdentityProviderUrl(),
+    maxTimeToLive: BigInt(8) * BigInt(3_600_000_000_000),
     onSuccess: async () => {
       identity = authClient.getIdentity();
+      authMode = "ii";
       await makeAgentAndActor();
-      try {
-        const prin = await actor.whoami();
-        uiSet("ii_status", `Signed in as: ${prin}`);
-
-        const dep = await friendlyTry(() => actor.get_deposit_address_ii(), (m) => showWarn(m));
-        uiSet("deposit", `ICP Deposit to: ${dep}`);
-        const solDep = await friendlyTry(() => actor.get_sol_deposit_address_ii(), (m) => showWarn(m));
-        uiSet("sol_deposit", `SOL Deposit to: ${solDep}`);
-        uiSet("pid", `ICP Principal: ${prin}`);
-
-        await refreshBothBalances(true);
-        showOk("Logged in with Internet Identity.");
-      } catch (e) {
-        uiSet("ii_status", `Signed in (fetch error).`);
-        showWarn(normalizeAgentError(e));
-      }
+      await hydrateActiveWallet(true);
+      showOk("Internet Identity connected.");
     },
-    onError: (err) => {
-      showErr(`II login failed: ${normalizeAgentError(err)}`);
-    }
+    onError: (error) => {
+      showErr(`Internet Identity login failed: ${normalizeAgentError(error)}`);
+    },
   });
 };
 
-document.getElementById("ii_logout").onclick = async () => {
+$("ii_logout").onclick = async () => {
   await initAuthIfNeeded();
   await authClient.logout();
   identity = null;
   await makeAgentAndActor();
-  uiSet("ii_status", "Not signed in");
-  uiSet("pid", "");
-  showMuted("Logged out of Internet Identity.");
+  renderConnectionState();
+
+  if (authMode === "ii") {
+    resetWalletDisplay(
+      "Internet Identity principal: sign in to load your wallet.",
+      "II mode can manage its own derived wallet, or a linked Phantom-derived wallet after linking."
+    );
+  }
+
+  showMuted("Internet Identity disconnected.");
 };
 
-// ---- Phantom connect/logout ----
-document.getElementById("connect").onclick = async () => {
-  if (authMode !== "phantom") return alert("Switch to Phantom mode first");
+$("connect").onclick = async () => {
+  const provider = getProvider(true);
+  if (!provider) return;
+
+  bindProviderEvents();
+
   try {
-    const resp = await provider.connect();
-    solPubkey = resp.publicKey.toString();
-    uiSet("pubkey", `Sol Pubkey: ${solPubkey} (Solana Mainnet)`);
-
-    const deposit = await friendlyTry(() => actor.get_deposit_address(solPubkey), (m) => showWarn(m));
-    uiSet("deposit", `ICP Deposit to: ${deposit} (Send ICP here)`);
-    const solDeposit = await friendlyTry(() => actor.get_sol_deposit_address(solPubkey), (m) => showWarn(m));
-    uiSet("sol_deposit", `SOL Deposit to: ${solDeposit} (Mainnet; send SOL here)`);
-
-    await refreshBothBalances(true);
-    showOk("Connected to Phantom.");
-  } catch (err) {
-    showErr(`Phantom connect error: ${normalizeAgentError(err)}`);
+    const response = await provider.connect();
+    solPubkey = response.publicKey.toString();
+    authMode = "phantom";
+    await ensureActor();
+    await hydrateActiveWallet(true);
+    showOk("Phantom connected.");
+  } catch (error) {
+    showErr(`Phantom connection failed: ${normalizeAgentError(error)}`);
   }
 };
 
-document.getElementById("logout").onclick = async () => {
-  try { await provider.disconnect(); } catch {}
-  solPubkey = null;
-  ["pubkey","pid","deposit","balance","sol_deposit","sol_balance"].forEach(id => uiSet(id, ""));
-  showMuted("Disconnected Phantom. To prevent auto-reconnect, revoke in Phantom settings.");
-};
-
-// ---- Link wallet to II (optional) ----
-document.getElementById("link_wallet").onclick = async () => {
-  if (!solPubkey) return alert("Connect Phantom first");
-  try {
-    if (!authClient) await initAuthIfNeeded();
-    if (!(await authClient.isAuthenticated())) return alert("Login with Internet Identity (II mode) to link");
-    const prin = await actor.whoami();
-    const message = `link ${prin}`;
-    const encoded = new TextEncoder().encode(message);
-    const signed = await provider.signMessage(encoded, "utf8");
-    const signature = signed.signature;
-
-    const res = await friendlyTry(() => actor.link_sol_pubkey(solPubkey, Array.from(signature)));
-    showOk(res);
-  } catch (err) {
-    showErr(`Link error: ${normalizeAgentError(err)}`);
-  }
-};
-
-// ---- ICP send ----
-let sendingIcp = false;
-document.getElementById("send").onclick = async () => {
-  if (sendingIcp) return showWarn("ICP send already in progress.");
-  sendingIcp = true;
-  const button = document.getElementById("send");
-  button.disabled = true; button.innerText = 'Processing... (may take 30s)';
-
-  let initialNonce;
-  try {
-    const to = document.getElementById("to").value;
-    const amountICP = document.getElementById("amount").value;
-    if (isNaN(parseFloat(amountICP)) || parseFloat(amountICP) < 0) {
-      throw new Error("Invalid amount");
+$("logout").onclick = async () => {
+  const provider = getProvider();
+  if (provider) {
+    try {
+      await provider.disconnect();
+    } catch {
+      // Ignore provider disconnect failures.
     }
-    const amount = BigInt(Math.round(parseFloat(amountICP) * 1e8));
+  }
+
+  solPubkey = null;
+  renderConnectionState();
+
+  if (authMode === "phantom") {
+    resetWalletDisplay(
+      "Phantom public key: connect your wallet to load the Phantom-managed account.",
+      "Phantom mode derives a shared ICP subaccount and a Solana address from your wallet public key."
+    );
+  }
+
+  showMuted("Phantom disconnected.");
+};
+
+$("link_wallet").onclick = async () => {
+  if (!identity) {
+    showWarn("Sign in with Internet Identity before linking a Phantom wallet.");
+    return;
+  }
+  if (!solPubkey) {
+    showWarn("Connect Phantom before trying to link the wallet.");
+    return;
+  }
+
+  const provider = getProvider(true);
+  if (!provider) return;
+
+  try {
+    await makeAgentAndActor();
+    const principal = await actor.whoami();
+    const message = `link ${principal}`;
+    const signed = await provider.signMessage(textEncoder.encode(message), "utf8");
+    const result = await friendlyTry(() =>
+      actor.link_sol_pubkey(solPubkey, Array.from(signed.signature))
+    );
+
+    setText(
+      "link_status",
+      result === "Linked" || result === "Already linked"
+        ? `Linked Phantom wallet: ${solPubkey}`
+        : result
+    );
+    showOk(result);
 
     if (authMode === "ii") {
-      initialNonce = await actor.get_nonce_ii();
+      await hydrateIiWallet(true);
+    }
+  } catch (error) {
+    showErr(`Linking failed: ${normalizeAgentError(error)}`);
+  }
+};
 
-      const totalICP = parseFloat(amountICP) + networkFeeICP + serviceFeeICP;
-      const confirmMsg = `Confirm transaction (II mode):\nTo: ${to}\nAmount: ${amountICP} ICP\nNetwork fee: ${networkFeeICP} ICP\nService fee: ${serviceFeeICP} ICP\nTotal deduction: ${totalICP.toFixed(8)} ICP`;
-      if (!window.confirm(confirmMsg)) throw new Error("Cancelled");
+$("unlink_wallet").onclick = async () => {
+  if (!identity) {
+    showWarn("Sign in with Internet Identity before unlinking.");
+    return;
+  }
 
-      const result = await withTimeout(friendlyTry(() => actor.transfer_ii(to, amount), (m) => showWarn(m)));
-      displayResult(result);
-      await refreshBothBalances(true);
-      if (result.startsWith("Transfer successful")) {
-        document.getElementById("to").value = '';
-        document.getElementById("amount").value = '';
-        showOk("ICP transfer complete. Balances updated.");
-      } else {
-        showWarn(result);
-      }
-      return;
+  try {
+    await makeAgentAndActor();
+    const result = await friendlyTry(() => actor.unlink_sol_pubkey());
+    setText("link_status", "The current II session is no longer linked to a Phantom wallet.");
+    showMuted(result);
+
+    if (authMode === "ii") {
+      await hydrateIiWallet(true);
+    }
+  } catch (error) {
+    showErr(`Unlinking failed: ${normalizeAgentError(error)}`);
+  }
+};
+
+$("refresh_icp").onclick = async () => {
+  await refreshIcpBalance(false, false);
+};
+
+$("get_sol").onclick = async () => {
+  await refreshSolBalance(false, false);
+};
+
+$("send").onclick = async () => {
+  if (sendingIcp) {
+    showWarn("An ICP transfer is already in progress.");
+    return;
+  }
+
+  sendingIcp = true;
+  $("send").disabled = true;
+  $("send").textContent = "Sending ICP...";
+
+  let initialNonce = null;
+
+  try {
+    const to = $("to").value.trim();
+    const amountInput = $("amount").value.trim();
+    const amountICP = validatePositiveAmount(amountInput, "ICP");
+    const amount = BigInt(Math.round(amountICP * 1e8));
+
+    if (!to) {
+      throw new Error("Enter a destination account identifier for ICP.");
     }
 
-    if (authMode === "phantom") {
-      if (!solPubkey) throw new Error("Connect Phantom first");
+    await ensureActor();
+
+    if (authMode === "ii") {
+      if (!identity) {
+        throw new Error("Sign in with Internet Identity first.");
+      }
+
+      initialNonce = await actor.get_nonce_ii();
+      const total = amountICP + networkFeeICP + serviceFeeICP;
+      const confirmed = window.confirm(
+        `Send ${amountICP.toFixed(8)} ICP?\n\nDestination: ${to}\nNetwork fee: ${networkFeeICP.toFixed(
+          4
+        )} ICP\nService fee: ${serviceFeeICP.toFixed(4)} ICP\nEstimated total deduction: ${total.toFixed(
+          8
+        )} ICP`
+      );
+      if (!confirmed) {
+        throw new Error("Cancelled");
+      }
+
+      const result = await withTimeout(
+        friendlyTry(() => actor.transfer_ii(to, amount), (message) => showWarn(message))
+      );
+      displayResult(result);
+      await refreshBothBalances(true, true);
+      showOk("ICP transfer submitted through Internet Identity mode.");
+    } else {
+      if (!solPubkey) {
+        throw new Error("Connect Phantom first.");
+      }
+
+      const provider = getProvider(true);
+      if (!provider) return;
 
       initialNonce = await actor.get_nonce(solPubkey);
-
-      const amountICPNum = parseFloat(amountICP);
-      const totalICP = amountICPNum + networkFeeICP + serviceFeeICP;
-      const confirmMsg = `Confirm transaction (Phantom mode):\nTo: ${to}\nAmount: ${amountICP} ICP\nNetwork fee: ${networkFeeICP} ICP\nService fee: ${serviceFeeICP} ICP\nTotal deduction: ${totalICP.toFixed(8)} ICP`;
-      if (!window.confirm(confirmMsg)) throw new Error("Cancelled");
+      const total = amountICP + networkFeeICP + serviceFeeICP;
+      const confirmed = window.confirm(
+        `Send ${amountICP.toFixed(8)} ICP?\n\nDestination: ${to}\nNetwork fee: ${networkFeeICP.toFixed(
+          4
+        )} ICP\nService fee: ${serviceFeeICP.toFixed(4)} ICP\nEstimated total deduction: ${total.toFixed(
+          8
+        )} ICP`
+      );
+      if (!confirmed) {
+        throw new Error("Cancelled");
+      }
 
       const message = `transfer to ${to} amount ${amount} nonce ${initialNonce} service_fee ${serviceFeeE8s}`;
-      const encodedMessage = new TextEncoder().encode(message);
-      const signed = await provider.signMessage(encodedMessage, "utf8");
-      const signature = signed.signature;
-
-      const result = await withTimeout(friendlyTry(() => actor.transfer(to, amount, solPubkey, Array.from(signature), initialNonce), (m) => showWarn(m)));
+      const signed = await provider.signMessage(textEncoder.encode(message), "utf8");
+      const result = await withTimeout(
+        friendlyTry(
+          () => actor.transfer(to, amount, solPubkey, Array.from(signed.signature), initialNonce),
+          (errorMessage) => showWarn(errorMessage)
+        )
+      );
       displayResult(result);
-      await refreshBothBalances(true);
-
-      if (result.startsWith("Transfer successful")) {
-        document.getElementById("to").value = '';
-        document.getElementById("amount").value = '';
-        showOk("ICP transfer complete. Balances updated.");
-      } else {
-        showWarn(result);
-      }
+      await refreshBothBalances(true, true);
+      showOk("ICP transfer submitted through Phantom mode.");
     }
-  } catch (err) {
-    const msg = (err?.message || String(err || "")).toLowerCase();
-    if (msg.includes("timed out") || msg.includes("processing")) {
+
+    $("to").value = "";
+    $("amount").value = "";
+  } catch (error) {
+    const message = (error?.message || String(error || "")).toLowerCase();
+    if (message.includes("timed out") || message.includes("processing")) {
       await confirmAfterTimeout(initialNonce, "ICP");
-    } else if (err.message === "Cancelled") {
-      // user cancelled
-    } else {
-      showErr(`ICP send error: ${normalizeAgentError(err)}`);
+    } else if (error.message !== "Cancelled") {
+      showErr(`ICP transfer failed: ${normalizeAgentError(error)}`);
     }
   } finally {
     sendingIcp = false;
-    button.disabled = false; button.innerText = 'Send ICP';
+    $("send").disabled = false;
+    $("send").textContent = "Send ICP";
   }
 };
 
-// ---- SOL read/send ----
-document.getElementById("get_sol").onclick = async () => {
-  await refreshSolBalance(false);
-};
+$("send_sol").onclick = async () => {
+  if (sendingSol) {
+    showWarn("A SOL transfer is already in progress.");
+    return;
+  }
 
-document.getElementById("refresh_icp").onclick = async () => {
-  await refreshIcpBalance(false);
-};
-
-let sendingSol = false;
-document.getElementById("send_sol").onclick = async () => {
-  if (sendingSol) return showWarn("SOL send already in progress.");
   sendingSol = true;
-  const button = document.getElementById("send_sol");
-  button.disabled = true; button.innerText = 'Processing... (may take 30s)';
+  $("send_sol").disabled = true;
+  $("send_sol").textContent = "Sending SOL...";
 
-  let initialNonce;
+  let initialNonce = null;
+
   try {
-    const to_sol = document.getElementById("to_sol").value;
-    const amountSOL = document.getElementById("amount_sol").value;
-    if (isNaN(parseFloat(amountSOL)) || parseFloat(amountSOL) < 0) {
-      throw new Error("Invalid amount");
+    const to = $("to_sol").value.trim();
+    const amountInput = $("amount_sol").value.trim();
+    const amountSol = validatePositiveAmount(amountInput, "SOL");
+    const amountLamports = BigInt(Math.round(amountSol * 1e9));
+
+    if (!to) {
+      throw new Error("Enter a destination Solana address.");
     }
-    const amountLam = BigInt(Math.round(parseFloat(amountSOL) * 1e9));
+
+    await ensureActor();
 
     if (authMode === "ii") {
+      if (!identity) {
+        throw new Error("Sign in with Internet Identity first.");
+      }
+
       initialNonce = await actor.get_nonce_ii();
-      const totalSOL = parseFloat(amountSOL) + solanaFeeApprox;
-      const totalIcpForSol = serviceFeeSolICP + icpLedgerFee;
-      const confirmMsg = `Confirm SOL transaction (II mode):\nTo: ${to_sol}\nAmount: ${amountSOL} SOL\nSolana fee: ~${solanaFeeApprox} SOL\nICP ledger fee: ${icpLedgerFee} ICP\nService fee: ${serviceFeeSolICP} ICP\nTotal SOL deduction: ${totalSOL.toFixed(9)} SOL\nTotal ICP deduction: ${totalIcpForSol.toFixed(4)} ICP`;
-      if (!window.confirm(confirmMsg)) throw new Error("Cancelled");
-
-      const result = await withTimeout(friendlyTry(() => actor.transfer_sol_ii(to_sol, amountLam), (m) => showWarn(m)));
-      displayResult(result);
-      await refreshBothBalances(true);
-      if (result.startsWith("Transfer successful")) {
-        document.getElementById("to_sol").value = '';
-        document.getElementById("amount_sol").value = '';
-        showOk("SOL transfer complete. Balances updated.");
-      } else {
-        showWarn(result);
+      const totalSol = amountSol + solanaFeeApprox;
+      const totalIcp = serviceFeeSolICP + icpLedgerFee;
+      const confirmed = window.confirm(
+        `Send ${amountSol.toFixed(9)} SOL?\n\nDestination: ${to}\nEstimated Solana fee: ${solanaFeeApprox.toFixed(
+          6
+        )} SOL\nICP ledger fee: ${icpLedgerFee.toFixed(4)} ICP\nService fee: ${serviceFeeSolICP.toFixed(
+          4
+        )} ICP\nEstimated SOL deduction: ${totalSol.toFixed(
+          9
+        )} SOL\nEstimated ICP deduction: ${totalIcp.toFixed(4)} ICP`
+      );
+      if (!confirmed) {
+        throw new Error("Cancelled");
       }
-      return;
-    }
 
-    if (authMode === "phantom") {
-      if (!solPubkey) throw new Error("Connect first");
-      initialNonce = await actor.get_nonce(solPubkey);
-
-      const amountSOLNum = parseFloat(amountSOL);
-      const totalSOL = amountSOLNum + solanaFeeApprox;
-      const totalIcpForSol = serviceFeeSolICP + icpLedgerFee;
-      const confirmMsg = `Confirm SOL transaction (Phantom mode):\nTo: ${to_sol}\nAmount: ${amountSOL} SOL\nSolana fee: ~${solanaFeeApprox} SOL\nICP ledger fee: ${icpLedgerFee} ICP\nService fee: ${serviceFeeSolICP} ICP\nTotal SOL deduction: ${totalSOL.toFixed(9)} SOL\nTotal ICP deduction: ${totalIcpForSol.toFixed(4)} ICP`;
-      if (!window.confirm(confirmMsg)) throw new Error("Cancelled");
-
-      const message = `transfer_sol to ${to_sol} amount ${amountLam} nonce ${initialNonce} service_fee ${serviceFeeSolE8s}`;
-      const encodedMessage = new TextEncoder().encode(message);
-      const signed = await provider.signMessage(encodedMessage, "utf8");
-      const signature = signed.signature;
-
-      const result = await withTimeout(friendlyTry(() => actor.transfer_sol(to_sol, amountLam, solPubkey, Array.from(signature), initialNonce), (m) => showWarn(m)));
+      const result = await withTimeout(
+        friendlyTry(() => actor.transfer_sol_ii(to, amountLamports), (message) => showWarn(message))
+      );
       displayResult(result);
-      await refreshBothBalances(true);
-
-      if (result.startsWith("Transfer successful")) {
-        document.getElementById("to_sol").value = '';
-        document.getElementById("amount_sol").value = '';
-        showOk("SOL transfer complete. Balances updated.");
-      } else {
-        showWarn(result);
-      }
-    }
-  } catch (err) {
-    const msg = (err?.message || String(err || "")).toLowerCase();
-    if (msg.includes("timed out") || msg.includes("processing")) {
-      await confirmAfterTimeout(initialNonce, "SOL");
-    } else if (err.message === "Cancelled") {
-      // noop
+      await refreshBothBalances(true, true);
+      showOk("SOL transfer submitted through Internet Identity mode.");
     } else {
-      showErr(`SOL send error: ${normalizeAgentError(err)}`);
+      if (!solPubkey) {
+        throw new Error("Connect Phantom first.");
+      }
+
+      const provider = getProvider(true);
+      if (!provider) return;
+
+      initialNonce = await actor.get_nonce(solPubkey);
+      const totalSol = amountSol + solanaFeeApprox;
+      const totalIcp = serviceFeeSolICP + icpLedgerFee;
+      const confirmed = window.confirm(
+        `Send ${amountSol.toFixed(9)} SOL?\n\nDestination: ${to}\nEstimated Solana fee: ${solanaFeeApprox.toFixed(
+          6
+        )} SOL\nICP ledger fee: ${icpLedgerFee.toFixed(4)} ICP\nService fee: ${serviceFeeSolICP.toFixed(
+          4
+        )} ICP\nEstimated SOL deduction: ${totalSol.toFixed(
+          9
+        )} SOL\nEstimated ICP deduction: ${totalIcp.toFixed(4)} ICP`
+      );
+      if (!confirmed) {
+        throw new Error("Cancelled");
+      }
+
+      const message = `transfer_sol to ${to} amount ${amountLamports} nonce ${initialNonce} service_fee ${serviceFeeSolE8s}`;
+      const signed = await provider.signMessage(textEncoder.encode(message), "utf8");
+      const result = await withTimeout(
+        friendlyTry(
+          () =>
+            actor.transfer_sol(
+              to,
+              amountLamports,
+              solPubkey,
+              Array.from(signed.signature),
+              initialNonce
+            ),
+          (errorMessage) => showWarn(errorMessage)
+        )
+      );
+      displayResult(result);
+      await refreshBothBalances(true, true);
+      showOk("SOL transfer submitted through Phantom mode.");
+    }
+
+    $("to_sol").value = "";
+    $("amount_sol").value = "";
+  } catch (error) {
+    const message = (error?.message || String(error || "")).toLowerCase();
+    if (message.includes("timed out") || message.includes("processing")) {
+      await confirmAfterTimeout(initialNonce, "SOL");
+    } else if (error.message !== "Cancelled") {
+      showErr(`SOL transfer failed: ${normalizeAgentError(error)}`);
     }
   } finally {
     sendingSol = false;
-    button.disabled = false; button.innerText = 'Send SOL';
+    $("send_sol").disabled = false;
+    $("send_sol").textContent = "Send SOL";
   }
 };
 
-// Polling function for nonce change (to confirm TX success after timeout)
-async function pollNonceForChange(initialNonce, maxAttempts = 10, intervalMs = 15000) {
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    await new Promise(resolve => setTimeout(resolve, intervalMs));
-    try {
-      const currentNonce = authMode === "ii" ? await actor.get_nonce_ii() : await actor.get_nonce(solPubkey);
-      if (currentNonce > initialNonce) {
-        return true; // success
-      }
-    } catch {}
-    showMuted(`Polling for confirmation (${attempt}/${maxAttempts})...`);
-  }
-  return false;
-}
-
-// Helper for timeout/processing -> confirm via nonce
-async function confirmAfterTimeout(initialNonce, assetType = "ICP") {
-  showMuted(`${assetType} send submitted, waiting for network confirmation...`);
-  const success = await pollNonceForChange(initialNonce, 12, 10000);
-  if (success) {
-    displayResult("Transfer successful (confirmed via nonce change)");
-    await refreshBothBalances(true);
-    showOk(`${assetType} transfer complete (delayed confirmation). Balances updated.`);
-  } else {
-    showWarn(`${assetType} send timed out and no confirmation detected. Check explorer or retry.`);
-  }
-}
-
-// Safer result classification
-function displayResult(res) {
-  const txDiv = document.getElementById('latest-tx');
-  let html = res;
-  let cls = 'muted';
-
-  const lower = res.toLowerCase();
-  const isSuccess = res.startsWith('Transfer successful');
-  const isHardFail = res.startsWith('Transfer failed') || res.startsWith('Send failed');
-  const isErrorish = !isSuccess && /error/.test(lower);
-
-  if (isSuccess) {
-    cls = 'ok';
-    const blockMatch = res.match(/block (\d+)/);
-    if (blockMatch) {
-      const block = blockMatch[1];
-      const link = `https://dashboard.internetcomputer.org/`;
-      html += ` <a href="${link}" target="_blank">View on ICP Dashboard</a>`;
-    }
-    const txidMatch = res.match(/txid (\S+)/);
-    if (txidMatch) {
-      const txid = txidMatch[1];
-      const link = `https://explorer.solana.com/tx/${txid}`;
-      html += ` <a href="${link}" target="_blank">View on Solana Explorer</a>`;
-    }
-  } else if (isHardFail) {
-    cls = 'err';
-  } else if (isErrorish) {
-    cls = 'warn';
-  }
-
-  txDiv.className = cls;
-  txDiv.innerHTML = html;
-}
-
-// ---- Boot ----
+await restoreIiSession();
+await restoreTrustedPhantomConnection();
 await makeAgentAndActor();
-uiSet("mode_status", "Pick a mode: Internet Identity or Phantom");
+bindProviderEvents();
+renderConnectionState();
+resetLatestTransaction();
+await hydrateActiveWallet(Boolean(identity || solPubkey));
 showMuted("Ready.");
-document.getElementById("latest-tx").innerHTML = "No transactions yet.";

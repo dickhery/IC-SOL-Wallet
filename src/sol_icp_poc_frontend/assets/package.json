@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "npx esbuild main.js --bundle --outfile=main.bundle.js --format=esm --platform=browser --minify --define:process.env.DFX_NETWORK=\\\"$DFX_NETWORK\\\" --define:process.env.CANISTER_ID_SOL_ICP_POC_BACKEND=\\\"$CANISTER_ID_SOL_ICP_POC_BACKEND\\\""
+    "build": "esbuild main.js --bundle --outfile=main.bundle.js --format=esm --platform=browser --minify --define:process.env.DFX_NETWORK=\\\"$DFX_NETWORK\\\" --define:process.env.CANISTER_ID_SOL_ICP_POC_BACKEND=\\\"$CANISTER_ID_SOL_ICP_POC_BACKEND\\\""
   },
   "keywords": [],
   "author": "",

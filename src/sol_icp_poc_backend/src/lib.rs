@@ -4,7 +4,6 @@
 use ic_cdk::{export_candid, query, update};
 use ic_cdk::api::canister_self as canister_id;
 use ic_cdk::api::call::call_raw128;
-use ic_cdk::api::caller;
 use ic_cdk::trap;
 use ic_cdk::management_canister::{
     SchnorrAlgorithm, SchnorrKeyId, SchnorrPublicKeyArgs, SchnorrPublicKeyResult,
@@ -241,6 +240,49 @@ fn derive_subaccount(sol_pubkey: &str) -> Subaccount {
     Subaccount(subaccount)
 }
 
+fn caller_principal() -> Principal {
+    ic_cdk::api::msg_caller()
+}
+
+fn require_authenticated_caller() -> Principal {
+    let caller = caller_principal();
+    if caller == Principal::anonymous() {
+        trap("Authentication required. Sign in with Internet Identity first.");
+    }
+    caller
+}
+
+fn linked_wallet_for_principal(caller: &Principal) -> Option<String> {
+    let caller_txt = caller.to_text();
+    PRINCIPAL_MAP.with(|m| m.borrow().get(&caller_txt))
+}
+
+async fn active_wallet_seed_for_principal(caller: Principal) -> String {
+    if let Some(linked_wallet) = linked_wallet_for_principal(&caller) {
+        linked_wallet
+    } else {
+        bs58::encode(get_user_sol_pk_for_path(caller.as_slice().to_vec()).await).into_string()
+    }
+}
+
+async fn active_sol_pubkey_for_principal(caller: Principal) -> [u8; 32] {
+    if let Some(linked_wallet) = linked_wallet_for_principal(&caller) {
+        get_user_sol_pk_from_wallet(&linked_wallet).await
+    } else {
+        get_user_sol_pk_for_path(caller.as_slice().to_vec()).await
+    }
+}
+
+fn active_derivation_path_seed_for_principal(caller: &Principal) -> Vec<u8> {
+    if let Some(linked_wallet) = linked_wallet_for_principal(caller) {
+        bs58::decode(linked_wallet)
+            .into_vec()
+            .unwrap_or_else(|_| trap("Stored linked wallet is invalid"))
+    } else {
+        caller.as_slice().to_vec()
+    }
+}
+
 fn verify_signature(sol_pubkey: &str, message: &[u8], signature: &[u8]) -> bool {
     let pubkey_bytes = match bs58::decode(sol_pubkey).into_vec() {
         Ok(bytes) if bytes.len() == 32 => bytes,
@@ -423,16 +465,10 @@ async fn get_user_sol_pk_from_wallet(sol_pubkey: &str) -> [u8; 32] {
     get_user_sol_pk_for_path(pubkey_bytes).await
 }
 
-async fn get_ii_sol_pk_for_caller() -> [u8; 32] {
-    let principal = caller();
-    let seed = principal.as_slice().to_vec(); // stable per-principal
-    get_user_sol_pk_for_path(seed).await
-}
-
 /* ------------------------------ ownership / authorization ------------------------------ */
 
 fn require_owner(sol_pubkey: &str) -> Result<(), String> {
-    let caller_txt = caller().to_text();
+    let caller_txt = caller_principal().to_text();
     let owner = OWNER_MAP.with(|m| m.borrow().get(&sol_pubkey.to_string()));
     match owner {
         Some(o) if o == caller_txt => Ok(()),
@@ -586,14 +622,14 @@ async fn sol_send_transaction_b64(tx_b64: String) -> Result<String, String> {
 
 #[query]
 fn whoami() -> String {
-    caller().to_text()
+    caller_principal().to_text()
 }
 
 /* ---------- link/unlink ---------- */
 
 #[update]
 fn unlink_sol_pubkey() -> String {
-    let principal_txt = caller().to_text();
+    let principal_txt = require_authenticated_caller().to_text();
     let linked = PRINCIPAL_MAP.with(|m| m.borrow().get(&principal_txt));
     match linked {
         Some(sol_pk) => {
@@ -608,7 +644,7 @@ fn unlink_sol_pubkey() -> String {
 #[update]
 fn link_sol_pubkey(sol_pubkey: String, signature: Vec<u8>) -> String {
     if sol_pubkey.is_empty() { return "Missing pubkey".into(); }
-    let principal_txt = caller().to_text();
+    let principal_txt = require_authenticated_caller().to_text();
     let msg = format!("link {}", principal_txt);
     if !verify_signature(&sol_pubkey, msg.as_bytes(), &signature) {
         return "Invalid signature".into();
@@ -644,13 +680,15 @@ fn link_sol_pubkey(sol_pubkey: String, signature: Vec<u8>) -> String {
 
 #[update]
 async fn get_sol_deposit_address_ii() -> String {
-    let user_pk = get_ii_sol_pk_for_caller().await;
+    let caller = require_authenticated_caller();
+    let user_pk = active_sol_pubkey_for_principal(caller).await;
     bs58::encode(user_pk).into_string()
 }
 
 #[update]
 async fn get_deposit_address_ii() -> String {
-    let sol_pk_str = bs58::encode(get_ii_sol_pk_for_caller().await).into_string();
+    let caller = require_authenticated_caller();
+    let sol_pk_str = active_wallet_seed_for_principal(caller).await;
     let subaccount = derive_subaccount(&sol_pk_str);
     let account = AccountIdentifier::new(&canister_id(), &subaccount);
     hex::encode(account.as_ref())
@@ -658,7 +696,8 @@ async fn get_deposit_address_ii() -> String {
 
 #[update]
 async fn get_sol_balance_ii() -> u64 {
-    let pubkey_str = bs58::encode(get_ii_sol_pk_for_caller().await).into_string();
+    let caller = require_authenticated_caller();
+    let pubkey_str = bs58::encode(active_sol_pubkey_for_principal(caller).await).into_string();
     match sol_get_balance_lamports(pubkey_str).await {
         Ok(lamports) => lamports,
         Err(e) => {
@@ -670,7 +709,8 @@ async fn get_sol_balance_ii() -> u64 {
 
 #[update]
 async fn get_balance_ii() -> u64 {
-    let sol_pk_str = bs58::encode(get_ii_sol_pk_for_caller().await).into_string();
+    let caller = require_authenticated_caller();
+    let sol_pk_str = active_wallet_seed_for_principal(caller).await;
     let subaccount = derive_subaccount(&sol_pk_str);
     let account = AccountIdentifier::new(&canister_id(), &subaccount);
     let args = ic_ledger_types::AccountBalanceArgs { account };
@@ -682,13 +722,15 @@ async fn get_balance_ii() -> u64 {
 
 #[update]
 async fn get_nonce_ii() -> u64 {
-    let sol_pk_str = bs58::encode(get_ii_sol_pk_for_caller().await).into_string();
+    let caller = require_authenticated_caller();
+    let sol_pk_str = active_wallet_seed_for_principal(caller).await;
     read_or_init_nonce(&sol_pk_str)
 }
 
 #[update]
 async fn transfer_ii(to: String, amount: u64) -> String {
-    let sol_pk_str = bs58::encode(get_ii_sol_pk_for_caller().await).into_string();
+    let caller = require_authenticated_caller();
+    let sol_pk_str = active_wallet_seed_for_principal(caller).await;
     let current_nonce = read_or_init_nonce(&sol_pk_str);
 
     let subaccount = derive_subaccount(&sol_pk_str);
@@ -746,7 +788,8 @@ async fn transfer_ii(to: String, amount: u64) -> String {
 
 #[update]
 async fn transfer_sol_ii(to: String, amount: u64) -> String {
-    let sol_pk_str = bs58::encode(get_ii_sol_pk_for_caller().await).into_string();
+    let caller = require_authenticated_caller();
+    let sol_pk_str = active_wallet_seed_for_principal(caller.clone()).await;
     let current_nonce = read_or_init_nonce(&sol_pk_str);
 
     let subaccount = derive_subaccount(&sol_pk_str);
@@ -777,7 +820,7 @@ async fn transfer_sol_ii(to: String, amount: u64) -> String {
         Err(_) => return "Invalid blockhash".into(),
     };
 
-    let from_pk = get_ii_sol_pk_for_caller().await;
+    let from_pk = active_sol_pubkey_for_principal(caller.clone()).await;
     let to_pk: [u8; 32] = match bs58::decode(&to).into_vec() {
         Ok(v) => match v.try_into() { Ok(a) => a, Err(_) => return "Invalid to address".into() },
         Err(_) => return "Invalid to address".into(),
@@ -797,7 +840,7 @@ async fn transfer_sol_ii(to: String, amount: u64) -> String {
 
     let sign_args = SignWithSchnorrArgs {
         message: msg_ser.clone(),
-        derivation_path: vec![caller().as_slice().to_vec()],
+        derivation_path: vec![active_derivation_path_seed_for_principal(&caller)],
         key_id: KEY_ID.clone(),
         aux: None,
     };

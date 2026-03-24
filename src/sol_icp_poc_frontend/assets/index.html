@@ -1,70 +1,177 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>Sol-ICP POC</title>
-  <style>
-    #alerts { margin-top: 8px; font-family: sans-serif; }
-    .ok { color: #0a7f2e; }
-    .warn { color: #a66a00; }
-    .err { color: #b00020; }
-    .muted { color: #666; }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
-    #latest-tx { margin-top: 8px; font-family: sans-serif; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-    #latest-tx.ok { color: #0a7f2e; border-color: #0a7f2e; }
-    #latest-tx.warn { color: #a66a00; border-color: #a66a00; }
-    #latest-tx.err { color: #b00020; border-color: #b00020; }
-    #latest-tx.muted { color: #666; border-color: #ccc; }
-  </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IC SOL Wallet</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <h1>Solana-Auth ICP App</h1>
+  <div class="ambient ambient-left"></div>
+  <div class="ambient ambient-right"></div>
 
-  <h2>Auth Mode</h2>
-  <p>Select authentication method. Switching will disconnect the other.</p>
-  <button id="mode_ii">Use Internet Identity</button>
-  <button id="mode_phantom">Use Phantom</button>
-  <p id="mode_status"></p>
+  <main class="app-shell">
+    <section class="hero-card">
+      <p class="eyebrow">Hybrid custody wallet</p>
+      <div class="hero-copy">
+        <div>
+          <h1>Run one wallet experience across Internet Identity and Phantom.</h1>
+          <p class="lede">
+            Authenticate with Internet Identity or connect Phantom, then hold and transfer ICP
+            and SOL from the same app with a clearer, faster operator view.
+          </p>
+        </div>
+        <div class="status-dock">
+          <div class="status-pill">
+            <span class="label">II Session</span>
+            <span id="ii_badge" class="status-badge muted">Offline</span>
+          </div>
+          <div class="status-pill">
+            <span class="label">Phantom</span>
+            <span id="phantom_badge" class="status-badge muted">Offline</span>
+          </div>
+          <p id="mode_status" class="mode-status">Active wallet: Internet Identity session</p>
+        </div>
+      </div>
+    </section>
 
-  <hr>
+    <section class="auth-grid">
+      <article class="panel auth-panel">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">Authentication</p>
+            <h2>Internet Identity</h2>
+          </div>
+        </div>
+        <p id="ii_status" class="support-copy">
+          Sign in with Internet Identity to unlock the II-managed wallet.
+        </p>
+        <div class="button-row">
+          <button id="ii_login" class="primary">Login with Internet Identity</button>
+          <button id="ii_logout" class="ghost">Logout</button>
+        </div>
+      </article>
 
-  <div id="ii_block" style="display:none;">
-    <h2>Internet Identity</h2>
-    <button id="ii_login">Login with Internet Identity</button>
-    <button id="ii_logout">Logout II</button>
-    <p id="ii_status"></p>
-    <p id="pid"></p>
-  </div>
+      <article class="panel auth-panel">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">Wallet Connection</p>
+            <h2>Phantom</h2>
+          </div>
+        </div>
+        <p id="status" class="support-copy">Connect Phantom to unlock the Phantom-managed wallet.</p>
+        <p id="pubkey" class="mono-copy"></p>
+        <div class="button-row">
+          <button id="connect" class="primary secondary-tone">Connect Phantom</button>
+          <button id="logout" class="ghost">Disconnect</button>
+        </div>
+      </article>
 
-  <div id="phantom_block" style="display:none;">
-    <h2>Phantom</h2>
-    <button id="connect">Connect Phantom</button>
-    <button id="logout">Logout Phantom</button>
-    <button id="link_wallet">Link Phantom Wallet to II (optional)</button>
-    <p id="status"></p>
-    <p id="pubkey"></p>
-  </div>
+      <article class="panel auth-panel">
+        <div class="panel-head">
+          <div>
+            <p class="panel-kicker">Linking</p>
+            <h2>Blend Both Auth Paths</h2>
+          </div>
+        </div>
+        <p id="link_status" class="support-copy">
+          Sign in with Internet Identity and connect Phantom to link the wallet contexts.
+        </p>
+        <div class="button-row">
+          <button id="link_wallet" class="primary warm-tone">Link Current Phantom Wallet</button>
+          <button id="unlink_wallet" class="ghost">Unlink</button>
+        </div>
+      </article>
+    </section>
 
-  <h2>ICP</h2>
-  <p id="deposit"></p>
-  <p id="balance"></p>
-  <button id="refresh_icp">Refresh ICP Balance</button>
-  <input id="to" placeholder="To Address (Account ID Only!)" />
-  <input id="amount" placeholder="Amount (ICP)" type="number" step="0.00000001" />
-  <button id="send">Send ICP</button>
+    <section class="panel workspace-panel">
+      <div class="workspace-head">
+        <div>
+          <p class="panel-kicker">Wallet Workspace</p>
+          <h2>Choose the wallet context you want to operate</h2>
+        </div>
+        <div class="mode-switch">
+          <button id="mode_ii" class="mode-chip is-active">Use II Wallet</button>
+          <button id="mode_phantom" class="mode-chip">Use Phantom Wallet</button>
+        </div>
+      </div>
 
-  <hr>
-  <h2>Solana</h2>
-  <p id="sol_deposit"></p>
-  <p id="sol_balance"></p>
-  <button id="get_sol">Refresh SOL Balance</button>
-  <input id="to_sol" placeholder="To Solana Address (base58)" />
-  <input id="amount_sol" placeholder="Amount (SOL)" type="number" step="0.000000001" />
-  <button id="send_sol">Send SOL</button>
+      <p id="wallet_hint" class="support-copy">
+        II mode can manage its own derived wallet, or a linked Phantom-derived wallet after linking.
+      </p>
+      <p id="pid" class="mono-copy">
+        Internet Identity principal: sign in to load your wallet.
+      </p>
 
-  <h3>Latest Transaction</h3>
-  <div id="latest-tx" class="muted">No transactions yet.</div>
+      <div class="workspace-grid">
+        <article class="token-card">
+          <div class="token-head">
+            <div>
+              <p class="token-label">ICP rail</p>
+              <h3>Deposit and transfer ICP</h3>
+            </div>
+            <button id="refresh_icp" class="ghost compact">Refresh ICP</button>
+          </div>
+          <p id="deposit" class="mono-card">ICP deposit address: waiting for authentication</p>
+          <p id="balance" class="metric-card">ICP Balance: --</p>
+          <div class="field-stack">
+            <label class="field">
+              <span>Recipient account identifier</span>
+              <input id="to" placeholder="To Address (Account ID)" />
+            </label>
+            <label class="field">
+              <span>Amount in ICP</span>
+              <input id="amount" placeholder="0.00000000" type="number" step="0.00000001" min="0" />
+            </label>
+          </div>
+          <button id="send" class="primary">Send ICP</button>
+        </article>
 
-  <div id="alerts"></div>
+        <article class="token-card">
+          <div class="token-head">
+            <div>
+              <p class="token-label">SOL rail</p>
+              <h3>Deposit and transfer SOL</h3>
+            </div>
+            <button id="get_sol" class="ghost compact">Refresh SOL</button>
+          </div>
+          <p id="sol_deposit" class="mono-card">SOL deposit address: waiting for authentication</p>
+          <p id="sol_balance" class="metric-card">SOL Balance: --</p>
+          <div class="field-stack">
+            <label class="field">
+              <span>Recipient Solana address</span>
+              <input id="to_sol" placeholder="Destination base58 address" />
+            </label>
+            <label class="field">
+              <span>Amount in SOL</span>
+              <input
+                id="amount_sol"
+                placeholder="0.000000000"
+                type="number"
+                step="0.000000001"
+                min="0"
+              />
+            </label>
+          </div>
+          <button id="send_sol" class="primary secondary-tone">Send SOL</button>
+        </article>
+      </div>
+    </section>
+
+    <section class="feedback-grid">
+      <article class="panel">
+        <p class="panel-kicker">Network Feedback</p>
+        <h2>Live activity</h2>
+        <div id="latest-tx" class="transaction-card muted">No transactions yet.</div>
+      </article>
+
+      <article class="panel">
+        <p class="panel-kicker">Status</p>
+        <h2>Operator notices</h2>
+        <div id="alerts" class="notice muted">Ready.</div>
+      </article>
+    </section>
+  </main>
 
   <script type="module" src="main.bundle.js"></script>
 </body>

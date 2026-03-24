@@ -275,6 +275,10 @@ h3 {
   margin-top: 0.9rem;
 }
 
+.auth-note {
+  min-height: 2.8em;
+}
+
 button {
   appearance: none;
   border: 0;

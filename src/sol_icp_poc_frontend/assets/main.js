@@ -17,6 +17,9 @@ const serviceFeeE8s = BigInt(Math.round(serviceFeeICP * 1e8));
 const serviceFeeSolE8s = BigInt(Math.round(serviceFeeSolICP * 1e8));
 const refreshCooldownMs = 10_000;
 const textEncoder = new TextEncoder();
+const phantomMobileConnectParam = "phantom_mobile_connect";
+const phantomBrowseBaseUrl = "https://phantom.app/ul/browse";
+const mobileUserAgentPattern = /android|iphone|ipad|ipod|iemobile|opera mini|mobile|blackberry/i;
 
 let authClient = null;
 let identity = null;
@@ -36,6 +39,7 @@ let dogeRefreshInFlight = false;
 let sendingIcp = false;
 let sendingSol = false;
 let sendingDoge = false;
+let connectingPhantom = false;
 
 const $ = (id) => document.getElementById(id);
 const compactValueMediaQuery = window.matchMedia("(max-width: 720px)");
@@ -90,6 +94,41 @@ function renderResponsiveValue(target) {
 
 function renderResponsiveValues() {
   responsiveValueIds.forEach(renderResponsiveValue);
+}
+
+function isMobileDevice() {
+  const userAgent = navigator.userAgent || navigator.vendor || "";
+  if (mobileUserAgentPattern.test(userAgent)) {
+    return true;
+  }
+  return navigator.maxTouchPoints > 1 && /Mac/i.test(navigator.platform || "");
+}
+
+function isPhantomReadyUrl() {
+  return (
+    window.location.protocol === "https:" ||
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1"
+  );
+}
+
+function buildPhantomBrowseUrl() {
+  const targetUrl = new URL(window.location.href);
+  targetUrl.searchParams.set(phantomMobileConnectParam, "1");
+  return `${phantomBrowseBaseUrl}/${encodeURIComponent(targetUrl.toString())}?ref=${encodeURIComponent(
+    window.location.origin
+  )}`;
+}
+
+function clearPhantomMobileConnectIntent() {
+  const currentUrl = new URL(window.location.href);
+  if (!currentUrl.searchParams.has(phantomMobileConnectParam)) {
+    return;
+  }
+
+  currentUrl.searchParams.delete(phantomMobileConnectParam);
+  const nextUrl = `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`;
+  window.history.replaceState({}, document.title, nextUrl || "/");
 }
 
 function setBadge(id, label, tone) {
@@ -274,15 +313,31 @@ async function disconnectPhantomSession() {
   solPubkey = null;
 }
 
-function getProvider(promptInstall = false) {
+function getProvider() {
   const provider = window.phantom?.solana;
   if (provider?.isPhantom) {
     return provider;
   }
-  if (promptInstall) {
-    window.open("https://phantom.app/", "_blank", "noopener,noreferrer");
-  }
   return null;
+}
+
+function openPhantomDownloadPage() {
+  window.open("https://phantom.app/download", "_blank", "noopener,noreferrer");
+}
+
+function openPhantomInAppBrowser() {
+  if (!isPhantomReadyUrl()) {
+    showWarn(
+      "Phantom mobile needs this app on an HTTPS URL before it can inject the wallet. Deploy or tunnel the frontend, then try again."
+    );
+    return false;
+  }
+
+  showMuted(
+    "Opening this page inside Phantom. If the connect sheet does not appear automatically, tap Connect Phantom after Phantom finishes loading."
+  );
+  window.location.assign(buildPhantomBrowseUrl());
+  return true;
 }
 
 function bindProviderEvents() {
@@ -304,6 +359,59 @@ function bindProviderEvents() {
   });
 }
 
+function updatePhantomConnectUi() {
+  const connectButton = $("connect");
+  const disconnectButton = $("logout");
+  if (!connectButton || !disconnectButton) {
+    return;
+  }
+
+  if (connectingPhantom) {
+    connectButton.textContent = "Connecting Phantom...";
+    connectButton.disabled = true;
+    disconnectButton.disabled = true;
+    setText("phantom_mobile_hint", "");
+    return;
+  }
+
+  connectButton.disabled = false;
+  disconnectButton.disabled = !solPubkey;
+
+  const provider = getProvider();
+  const mobile = isMobileDevice();
+
+  if (solPubkey) {
+    connectButton.textContent = "Reconnect Phantom";
+    setText("phantom_mobile_hint", "");
+    return;
+  }
+
+  if (provider) {
+    connectButton.textContent = "Connect Phantom";
+    setText(
+      "phantom_mobile_hint",
+      mobile
+        ? "You are inside Phantom's in-app browser. Connecting here enables Phantom signatures for ICP, SOL, and DOGE transfers."
+        : ""
+    );
+    return;
+  }
+
+  if (mobile) {
+    connectButton.textContent = "Open in Phantom";
+    setText(
+      "phantom_mobile_hint",
+      isPhantomReadyUrl()
+        ? "Phantom only injects wallet access inside its in-app browser on mobile. Tapping the button will reopen this page there."
+        : "Phantom mobile requires this app to be served from HTTPS before wallet injection is available."
+    );
+    return;
+  }
+
+  connectButton.textContent = "Get Phantom";
+  setText("phantom_mobile_hint", "Desktop Phantom connections use the browser extension.");
+}
+
 function renderConnectionState() {
   syncAuthModeFromState();
   setBadge("ii_badge", identity ? "Connected" : "Offline", identity ? "ok" : "muted");
@@ -323,9 +431,18 @@ function renderConnectionState() {
     "status",
     solPubkey
       ? "Phantom connected on Solana mainnet."
-      : "Connect Phantom to unlock the Phantom-managed wallet."
+      : connectingPhantom
+        ? "Connecting to Phantom..."
+        : getProvider()
+          ? "Connect Phantom to unlock the Phantom-managed wallet."
+          : isMobileDevice()
+            ? isPhantomReadyUrl()
+              ? "Mobile browser detected. Open this app in Phantom to connect your wallet."
+              : "Mobile browser detected. Phantom needs this app on HTTPS before it can connect."
+            : "Install Phantom to unlock the Phantom-managed wallet."
   );
   setResponsiveValue("pubkey", "Phantom public key", solPubkey, "");
+  updatePhantomConnectUi();
 }
 
 async function restoreIiSession() {
@@ -353,6 +470,72 @@ async function ensureActor() {
   if (!actor) {
     await makeAgentAndActor();
   }
+}
+
+async function connectPhantomWallet() {
+  const provider = getProvider();
+  if (!provider) {
+    if (isMobileDevice()) {
+      openPhantomInAppBrowser();
+    } else {
+      openPhantomDownloadPage();
+    }
+    return false;
+  }
+
+  if (connectingPhantom) {
+    return false;
+  }
+
+  connectingPhantom = true;
+  bindProviderEvents();
+  renderConnectionState();
+
+  try {
+    const response = await provider.connect();
+    const hadIiSession = Boolean(identity);
+    if (hadIiSession) {
+      await logoutIiSession();
+    }
+    solPubkey = response.publicKey.toString();
+    await makeAgentAndActor();
+    await hydrateActiveWallet(true);
+    showOk(
+      hadIiSession
+        ? "Phantom connected. Internet Identity was logged out to keep a single active session."
+        : "Phantom connected."
+    );
+    return true;
+  } catch (error) {
+    showErr(`Phantom connection failed: ${normalizeAgentError(error)}`);
+    return false;
+  } finally {
+    connectingPhantom = false;
+    renderConnectionState();
+  }
+}
+
+async function maybeContinuePhantomMobileConnect() {
+  const currentUrl = new URL(window.location.href);
+  if (currentUrl.searchParams.get(phantomMobileConnectParam) !== "1") {
+    return { attempted: false, connected: false };
+  }
+
+  clearPhantomMobileConnectIntent();
+
+  if (solPubkey) {
+    return { attempted: true, connected: false };
+  }
+
+  if (!getProvider()) {
+    showWarn(
+      "This page opened without Phantom injection. Open the app from Phantom's in-app browser on an HTTPS URL and try again."
+    );
+    return { attempted: true, connected: false };
+  }
+
+  showMuted("Phantom is ready. Finishing wallet connection...");
+  return { attempted: true, connected: await connectPhantomWallet() };
 }
 
 async function hydrateIiWallet(forceBalances = true) {
@@ -815,28 +998,7 @@ $("ii_logout").onclick = async () => {
 };
 
 $("connect").onclick = async () => {
-  const provider = getProvider(true);
-  if (!provider) return;
-
-  bindProviderEvents();
-
-  try {
-    const response = await provider.connect();
-    const hadIiSession = Boolean(identity);
-    if (hadIiSession) {
-      await logoutIiSession();
-    }
-    solPubkey = response.publicKey.toString();
-    await makeAgentAndActor();
-    await hydrateActiveWallet(true);
-    showOk(
-      hadIiSession
-        ? "Phantom connected. Internet Identity was logged out to keep a single active session."
-        : "Phantom connected."
-    );
-  } catch (error) {
-    showErr(`Phantom connection failed: ${normalizeAgentError(error)}`);
-  }
+  await connectPhantomWallet();
 };
 
 $("logout").onclick = async () => {
@@ -923,8 +1085,10 @@ $("send").onclick = async () => {
         throw new Error("Connect Phantom first.");
       }
 
-      const provider = getProvider(true);
-      if (!provider) return;
+      const provider = getProvider();
+      if (!provider) {
+        throw new Error("Open this page inside Phantom or unlock Phantom first.");
+      }
 
       initialNonce = await actor.get_nonce(solPubkey);
       const total = amountICP + networkFeeICP + serviceFeeICP;
@@ -1026,8 +1190,10 @@ $("send_sol").onclick = async () => {
         throw new Error("Connect Phantom first.");
       }
 
-      const provider = getProvider(true);
-      if (!provider) return;
+      const provider = getProvider();
+      if (!provider) {
+        throw new Error("Open this page inside Phantom or unlock Phantom first.");
+      }
 
       initialNonce = await actor.get_nonce(solPubkey);
       const totalSol = amountSol + solanaFeeApprox;
@@ -1134,8 +1300,10 @@ $("send_doge").onclick = async () => {
         throw new Error("Connect Phantom first.");
       }
 
-      const provider = getProvider(true);
-      if (!provider) return;
+      const provider = getProvider();
+      if (!provider) {
+        throw new Error("Open this page inside Phantom or unlock Phantom first.");
+      }
 
       initialNonce = await actor.get_nonce(solPubkey);
       const confirmed = window.confirm(
@@ -1195,5 +1363,10 @@ if (compactValueMediaQuery.addEventListener) {
 } else if (compactValueMediaQuery.addListener) {
   compactValueMediaQuery.addListener(renderResponsiveValues);
 }
-await hydrateActiveWallet(Boolean(identity || solPubkey));
-showMuted("Ready with ICP, SOL, and DOGE.");
+const resumedPhantomMobileConnect = await maybeContinuePhantomMobileConnect();
+if (!resumedPhantomMobileConnect.connected) {
+  await hydrateActiveWallet(Boolean(identity || solPubkey));
+}
+if (!resumedPhantomMobileConnect.attempted) {
+  showMuted("Ready with ICP, SOL, and DOGE.");
+}

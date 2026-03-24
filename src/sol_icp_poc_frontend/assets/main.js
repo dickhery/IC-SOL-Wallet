@@ -38,12 +38,58 @@ let sendingSol = false;
 let sendingDoge = false;
 
 const $ = (id) => document.getElementById(id);
+const compactValueMediaQuery = window.matchMedia("(max-width: 720px)");
+const responsiveValueIds = ["pubkey", "pid", "deposit", "sol_deposit", "doge_deposit"];
 
 function setText(id, value) {
   const el = $(id);
   if (el) {
     el.textContent = value ?? "";
   }
+}
+
+function compactMiddle(value, start = 10, end = 8) {
+  if (!value || value.length <= start + end + 3) {
+    return value || "";
+  }
+  return `${value.slice(0, start)}...${value.slice(-end)}`;
+}
+
+function setResponsiveValue(id, label, value, fallback = "") {
+  const el = $(id);
+  if (!el) return;
+  el.dataset.label = label || "";
+  el.dataset.fullValue = value || "";
+  el.dataset.fallback = fallback || "";
+  renderResponsiveValue(el);
+}
+
+function renderResponsiveValue(target) {
+  const el = typeof target === "string" ? $(target) : target;
+  if (!el) return;
+
+  const label = el.dataset.label || "";
+  const fullValue = el.dataset.fullValue || "";
+  const fallback = el.dataset.fallback || "";
+
+  if (!fullValue) {
+    el.textContent = fallback;
+    el.removeAttribute("title");
+    return;
+  }
+
+  const visibleValue = compactValueMediaQuery.matches ? compactMiddle(fullValue) : fullValue;
+  el.textContent = label ? `${label}: ${visibleValue}` : visibleValue;
+
+  if (visibleValue !== fullValue) {
+    el.title = fullValue;
+  } else {
+    el.removeAttribute("title");
+  }
+}
+
+function renderResponsiveValues() {
+  responsiveValueIds.forEach(renderResponsiveValue);
 }
 
 function setBadge(id, label, tone) {
@@ -102,12 +148,12 @@ function setWalletAddresses({ icp = null, sol = null, doge = null } = {}) {
 
 function resetWalletDisplay(reason, hint) {
   setWalletAddresses();
-  setText("pid", reason);
-  setText("deposit", "ICP deposit address: waiting for authentication");
+  setResponsiveValue("pid", "", "", reason);
+  setResponsiveValue("deposit", "", "", "ICP deposit address: waiting for authentication");
   setText("balance", "ICP Balance: --");
-  setText("sol_deposit", "SOL deposit address: waiting for authentication");
+  setResponsiveValue("sol_deposit", "", "", "SOL deposit address: waiting for authentication");
   setText("sol_balance", "SOL Balance: --");
-  setText("doge_deposit", "DOGE deposit address: waiting for authentication");
+  setResponsiveValue("doge_deposit", "", "", "DOGE deposit address: waiting for authentication");
   setText("doge_balance", "DOGE Balance: --");
   setText("wallet_hint", hint);
 }
@@ -279,7 +325,7 @@ function renderConnectionState() {
       ? "Phantom connected on Solana mainnet."
       : "Connect Phantom to unlock the Phantom-managed wallet."
   );
-  setText("pubkey", solPubkey ? `Phantom public key: ${solPubkey}` : "");
+  setResponsiveValue("pubkey", "Phantom public key", solPubkey, "");
 }
 
 async function restoreIiSession() {
@@ -329,10 +375,10 @@ async function hydrateIiWallet(forceBalances = true) {
     ]);
 
     setWalletAddresses({ icp: deposit, sol: solDeposit, doge: dogeDeposit });
-    setText("pid", `Internet Identity principal: ${principal}`);
-    setText("deposit", `ICP deposit address: ${deposit}`);
-    setText("sol_deposit", `SOL deposit address: ${solDeposit}`);
-    setText("doge_deposit", `DOGE deposit address: ${dogeDeposit}`);
+    setResponsiveValue("pid", "Internet Identity principal", String(principal));
+    setResponsiveValue("deposit", "ICP deposit address", deposit);
+    setResponsiveValue("sol_deposit", "SOL deposit address", solDeposit);
+    setResponsiveValue("doge_deposit", "DOGE deposit address", dogeDeposit);
     setText(
       "wallet_hint",
       "This wallet is derived from your Internet Identity session across ICP, SOL, and DOGE."
@@ -365,10 +411,10 @@ async function hydratePhantomWallet(forceBalances = true) {
     ]);
 
     setWalletAddresses({ icp: deposit, sol: solDeposit, doge: dogeDeposit });
-    setText("pid", `Phantom public key: ${solPubkey}`);
-    setText("deposit", `ICP deposit address: ${deposit}`);
-    setText("sol_deposit", `SOL deposit address: ${solDeposit}`);
-    setText("doge_deposit", `DOGE deposit address: ${dogeDeposit}`);
+    setResponsiveValue("pid", "Phantom public key", solPubkey);
+    setResponsiveValue("deposit", "ICP deposit address", deposit);
+    setResponsiveValue("sol_deposit", "SOL deposit address", solDeposit);
+    setResponsiveValue("doge_deposit", "DOGE deposit address", dogeDeposit);
     setText(
       "wallet_hint",
       "This wallet is derived from your Phantom public key and requires Phantom signatures for transfers."
@@ -1144,5 +1190,10 @@ bindProviderEvents();
 renderConnectionState();
 updateCopyButtons();
 resetLatestTransaction();
+if (compactValueMediaQuery.addEventListener) {
+  compactValueMediaQuery.addEventListener("change", renderResponsiveValues);
+} else if (compactValueMediaQuery.addListener) {
+  compactValueMediaQuery.addListener(renderResponsiveValues);
+}
 await hydrateActiveWallet(Boolean(identity || solPubkey));
 showMuted("Ready with ICP, SOL, and DOGE.");

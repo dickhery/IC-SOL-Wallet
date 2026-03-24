@@ -15,12 +15,29 @@
   --warn: #a66a00;
   --err: #b13b31;
   --shadow: 0 28px 70px rgba(53, 35, 14, 0.14);
-  --radius-xl: 28px;
-  --radius-lg: 20px;
-  --radius-md: 14px;
+  --radius-xl: clamp(22px, 2.6vw, 28px);
+  --radius-lg: clamp(16px, 2.2vw, 20px);
+  --radius-md: clamp(12px, 1.8vw, 14px);
   --font-display: "Avenir Next", "Trebuchet MS", "Gill Sans", sans-serif;
   --font-body: "Avenir Next", "Helvetica Neue", sans-serif;
   --font-mono: "IBM Plex Mono", "SFMono-Regular", "Menlo", monospace;
+  --shell-width: min(1120px, calc(100% - clamp(0.75rem, 2vw, 1.5rem)));
+  --section-gap: clamp(0.9rem, 2vw, 1.4rem);
+  --card-padding: clamp(1rem, 2.8vw, 1.35rem);
+  --hero-padding: clamp(1.15rem, 3vw, 1.8rem);
+  --button-pad-y: clamp(0.72rem, 1.7vw, 0.85rem);
+  --button-pad-x: clamp(0.95rem, 2vw, 1.15rem);
+  --compact-pad-y: clamp(0.52rem, 1.3vw, 0.65rem);
+  --compact-pad-x: clamp(0.78rem, 1.6vw, 0.9rem);
+  --field-pad-y: clamp(0.78rem, 2vw, 0.95rem);
+  --field-pad-x: clamp(0.85rem, 2vw, 1rem);
+  --eyebrow-size: clamp(0.68rem, 0.22vw + 0.64rem, 0.75rem);
+  --small-copy-size: clamp(0.84rem, 0.18vw + 0.8rem, 0.92rem);
+  --mono-size: clamp(0.82rem, 0.18vw + 0.78rem, 0.93rem);
+}
+
+html {
+  font-size: clamp(14px, 0.35vw + 13px, 16px);
 }
 
 * {
@@ -30,6 +47,7 @@
 body {
   margin: 0;
   min-height: 100vh;
+  overflow-x: hidden;
   background:
     radial-gradient(circle at top left, rgba(17, 106, 99, 0.12), transparent 34%),
     radial-gradient(circle at bottom right, rgba(189, 93, 56, 0.16), transparent 38%),
@@ -66,11 +84,11 @@ body {
 .app-shell {
   position: relative;
   z-index: 1;
-  width: min(1200px, calc(100% - 2rem));
+  width: var(--shell-width);
   margin: 0 auto;
-  padding: 2rem 0 3rem;
+  padding: clamp(0.95rem, 2.6vw, 2rem) 0 clamp(1.7rem, 4vw, 3rem);
   display: grid;
-  gap: 1.4rem;
+  gap: var(--section-gap);
 }
 
 .hero-card,
@@ -84,7 +102,7 @@ body {
 
 .hero-card {
   border-radius: calc(var(--radius-xl) + 6px);
-  padding: 1.8rem;
+  padding: var(--hero-padding);
   overflow: hidden;
   position: relative;
 }
@@ -102,18 +120,22 @@ body {
 .eyebrow,
 .panel-kicker,
 .token-label {
-  margin: 0 0 0.55rem;
+  margin: 0 0 0.45rem;
   text-transform: uppercase;
   letter-spacing: 0.16em;
-  font-size: 0.75rem;
+  font-size: var(--eyebrow-size);
   color: var(--muted);
 }
 
 .hero-copy {
   display: grid;
-  gap: 1.5rem;
+  gap: clamp(1rem, 2.6vw, 1.5rem);
   align-items: end;
-  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.8fr);
+  grid-template-columns: minmax(0, 1.35fr) minmax(220px, 0.82fr);
+}
+
+.hero-copy > div {
+  min-width: 0;
 }
 
 h1,
@@ -126,17 +148,17 @@ h3 {
 }
 
 h1 {
-  font-size: clamp(2rem, 4vw, 3.5rem);
-  line-height: 0.98;
-  max-width: 12ch;
+  font-size: clamp(1.75rem, 4.2vw, 3rem);
+  line-height: 1.02;
+  max-width: 13ch;
 }
 
 h2 {
-  font-size: 1.4rem;
+  font-size: clamp(1.12rem, 0.9vw + 0.94rem, 1.35rem);
 }
 
 h3 {
-  font-size: 1.18rem;
+  font-size: clamp(1rem, 0.6vw + 0.9rem, 1.14rem);
 }
 
 .lede,
@@ -148,40 +170,42 @@ h3 {
 }
 
 .lede {
-  margin-top: 1rem;
-  max-width: 58ch;
-  font-size: 1.02rem;
+  margin-top: 0.85rem;
+  max-width: 54ch;
+  font-size: clamp(0.96rem, 0.3vw + 0.88rem, 1.02rem);
 }
 
 .status-dock {
   display: grid;
-  gap: 0.85rem;
+  gap: 0.75rem;
   justify-items: start;
+  min-width: 0;
 }
 
 .status-pill {
   display: inline-flex;
   align-items: center;
-  gap: 0.7rem;
-  padding: 0.7rem 0.9rem;
+  gap: 0.6rem;
+  padding: 0.62rem 0.82rem;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.52);
   border: 1px solid rgba(80, 53, 28, 0.08);
+  flex-wrap: wrap;
 }
 
 .label {
   color: var(--muted);
-  font-size: 0.88rem;
+  font-size: 0.84rem;
 }
 
 .status-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 5.8rem;
-  padding: 0.35rem 0.7rem;
+  min-width: 5.1rem;
+  padding: 0.3rem 0.65rem;
   border-radius: 999px;
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -201,7 +225,7 @@ h3 {
 .feedback-grid,
 .workspace-grid {
   display: grid;
-  gap: 1.2rem;
+  gap: clamp(0.9rem, 2vw, 1.2rem);
 }
 
 .auth-grid {
@@ -219,7 +243,7 @@ h3 {
 .panel,
 .token-card {
   border-radius: var(--radius-xl);
-  padding: 1.35rem;
+  padding: var(--card-padding);
   animation: rise 0.5s ease both;
 }
 
@@ -229,7 +253,8 @@ h3 {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.85rem;
+  flex-wrap: wrap;
 }
 
 .workspace-panel {
@@ -245,20 +270,23 @@ h3 {
 
 .button-row {
   display: flex;
-  gap: 0.75rem;
+  gap: 0.65rem;
   flex-wrap: wrap;
-  margin-top: 1rem;
+  margin-top: 0.9rem;
 }
 
 button {
   appearance: none;
   border: 0;
   border-radius: 999px;
-  padding: 0.85rem 1.15rem;
+  padding: var(--button-pad-y) var(--button-pad-x);
   font: inherit;
+  font-size: 0.95rem;
   font-weight: 700;
   cursor: pointer;
   transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
+  min-height: 2.7rem;
+  touch-action: manipulation;
 }
 
 button:hover:not(:disabled) {
@@ -293,8 +321,9 @@ button:disabled {
 }
 
 .compact {
-  padding: 0.65rem 0.9rem;
-  font-size: 0.92rem;
+  padding: var(--compact-pad-y) var(--compact-pad-x);
+  font-size: 0.86rem;
+  min-height: auto;
 }
 
 .mode-chip {
@@ -313,27 +342,29 @@ button:disabled {
 .mono-card {
   font-family: var(--font-mono);
   word-break: break-word;
+  overflow-wrap: anywhere;
+  font-size: var(--mono-size);
 }
 
 .address-stack {
   display: grid;
-  gap: 0.7rem;
+  gap: 0.6rem;
 }
 
 .mono-copy {
   margin: 0.35rem 0 0;
   color: var(--ink);
-  font-size: 0.93rem;
 }
 
 .mono-card {
   margin: 0;
-  min-height: 5.3rem;
-  padding: 1rem;
+  min-height: clamp(4rem, 10vw, 5.3rem);
+  padding: clamp(0.82rem, 2.2vw, 1rem);
   border-radius: var(--radius-lg);
   background: rgba(255, 255, 255, 0.78);
   border: 1px solid rgba(80, 53, 28, 0.08);
   color: var(--ink);
+  line-height: 1.45;
 }
 
 .copy-button {
@@ -342,21 +373,21 @@ button:disabled {
 
 .metric-card {
   margin: 0;
-  font-size: 1.1rem;
+  font-size: clamp(1rem, 0.6vw + 0.9rem, 1.1rem);
   font-weight: 700;
   color: var(--ink);
 }
 
 .field-stack {
   display: grid;
-  gap: 0.85rem;
+  gap: 0.75rem;
 }
 
 .field {
   display: grid;
   gap: 0.45rem;
   color: var(--muted);
-  font-size: 0.92rem;
+  font-size: var(--small-copy-size);
 }
 
 .field input {
@@ -365,8 +396,9 @@ button:disabled {
   border: 1px solid rgba(80, 53, 28, 0.12);
   background: rgba(255, 255, 255, 0.84);
   color: var(--ink);
-  padding: 0.95rem 1rem;
+  padding: var(--field-pad-y) var(--field-pad-x);
   font: inherit;
+  min-width: 0;
 }
 
 .field input:focus {
@@ -392,7 +424,7 @@ button:disabled {
 
 .transaction-card,
 .notice {
-  padding: 1rem 1.05rem;
+  padding: clamp(0.85rem, 2vw, 1rem) clamp(0.9rem, 2.2vw, 1.05rem);
   border-radius: var(--radius-lg);
   border: 1px solid rgba(80, 53, 28, 0.08);
   background: rgba(255, 255, 255, 0.72);
@@ -451,8 +483,6 @@ button:disabled {
 
 @media (max-width: 980px) {
   .hero-copy,
-  .auth-grid,
-  .feedback-grid,
   .workspace-grid {
     grid-template-columns: 1fr;
   }
@@ -463,6 +493,10 @@ button:disabled {
     align-items: flex-start;
     flex-direction: column;
   }
+
+  .status-dock {
+    width: 100%;
+  }
 }
 
 @media (max-width: 1180px) and (min-width: 981px) {
@@ -471,21 +505,56 @@ button:disabled {
   }
 }
 
+@media (max-width: 860px) {
+  .auth-grid,
+  .feedback-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .ambient {
+    width: 18rem;
+    height: 18rem;
+    filter: blur(26px);
+    opacity: 0.36;
+  }
+
+  .status-pill {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .button-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .button-row > * {
+    width: 100%;
+  }
+}
+
 @media (max-width: 640px) {
   .app-shell {
-    width: min(100% - 1rem, 100%);
-    padding-top: 1rem;
+    width: min(100% - 0.75rem, 100%);
+    padding-top: 0.85rem;
   }
 
   .hero-card,
   .panel,
   .token-card {
     border-radius: 22px;
-    padding: 1.1rem;
+    padding: clamp(0.95rem, 4.4vw, 1.1rem);
   }
 
   h1 {
-    max-width: none;
+    max-width: 11ch;
+  }
+
+  .hero-card::after {
+    width: 12rem;
+    height: 12rem;
   }
 
   .button-row,
@@ -497,5 +566,20 @@ button:disabled {
   .mode-chip {
     width: 100%;
     justify-content: center;
+  }
+
+  .token-head .compact,
+  .copy-button {
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .status-pill {
+    align-items: flex-start;
+  }
+
+  .status-badge {
+    min-width: 0;
   }
 }

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>IC SOL Wallet</title>
+  <title>IC Multi Wallet</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -18,7 +18,8 @@
           <h1>Run one wallet experience across Internet Identity and Phantom.</h1>
           <p class="lede">
             Authenticate with Internet Identity or connect Phantom, then hold and transfer ICP
-            and SOL from the same app. Only one authentication method stays active at a time.
+            and SOL from the same app. DOGE now rides alongside them through the same single-session
+            wallet flow. Only one authentication method stays active at a time.
           </p>
         </div>
         <div class="status-dock">
@@ -77,7 +78,7 @@
       </div>
 
       <p id="wallet_hint" class="support-copy">
-        Sign in with Internet Identity or connect Phantom to load deposit addresses and balances.
+        Sign in with Internet Identity or connect Phantom to load your ICP, SOL, and DOGE wallet rails.
       </p>
       <p id="pid" class="mono-copy">
         No active wallet session. Sign in with Internet Identity or connect Phantom to continue.
@@ -92,7 +93,10 @@
             </div>
             <button id="refresh_icp" class="ghost compact">Refresh ICP</button>
           </div>
-          <p id="deposit" class="mono-card">ICP deposit address: waiting for authentication</p>
+          <div class="address-stack">
+            <p id="deposit" class="mono-card">ICP deposit address: waiting for authentication</p>
+            <button id="copy_icp" class="ghost compact copy-button" disabled>Copy ICP Address</button>
+          </div>
           <p id="balance" class="metric-card">ICP Balance: --</p>
           <div class="field-stack">
             <label class="field">
@@ -115,7 +119,10 @@
             </div>
             <button id="get_sol" class="ghost compact">Refresh SOL</button>
           </div>
-          <p id="sol_deposit" class="mono-card">SOL deposit address: waiting for authentication</p>
+          <div class="address-stack">
+            <p id="sol_deposit" class="mono-card">SOL deposit address: waiting for authentication</p>
+            <button id="copy_sol" class="ghost compact copy-button" disabled>Copy SOL Address</button>
+          </div>
           <p id="sol_balance" class="metric-card">SOL Balance: --</p>
           <div class="field-stack">
             <label class="field">
@@ -134,6 +141,42 @@
             </label>
           </div>
           <button id="send_sol" class="primary secondary-tone">Send SOL</button>
+        </article>
+
+        <article class="token-card doge-card">
+          <div class="token-head">
+            <div>
+              <p class="token-label">DOGE rail</p>
+              <h3>Deposit and transfer DOGE</h3>
+            </div>
+            <button id="refresh_doge" class="ghost compact">Refresh DOGE</button>
+          </div>
+          <div class="address-stack">
+            <p id="doge_deposit" class="mono-card">DOGE deposit address: waiting for authentication</p>
+            <button id="copy_doge" class="ghost compact copy-button" disabled>Copy DOGE Address</button>
+          </div>
+          <p id="doge_balance" class="metric-card">DOGE Balance: --</p>
+          <p class="support-copy">
+            DOGE sends use a provider-backed mainnet broadcast flow. Exact miner fees are selected
+            at submission time.
+          </p>
+          <div class="field-stack">
+            <label class="field">
+              <span>Recipient DOGE address</span>
+              <input id="to_doge" placeholder="Destination Dogecoin address" />
+            </label>
+            <label class="field">
+              <span>Amount in DOGE</span>
+              <input
+                id="amount_doge"
+                placeholder="0.00000000"
+                type="number"
+                step="0.00000001"
+                min="0"
+              />
+            </label>
+          </div>
+          <button id="send_doge" class="primary warm-tone">Send DOGE</button>
         </article>
       </div>
     </section>

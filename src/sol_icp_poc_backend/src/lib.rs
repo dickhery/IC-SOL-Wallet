@@ -6,8 +6,12 @@ use ic_cdk::api::canister_self as canister_id;
 use ic_cdk::api::call::call_raw128;
 use ic_cdk::trap;
 use ic_cdk::management_canister::{
+    ecdsa_public_key, http_request, sign_with_ecdsa, transform_context_from_query,
+    EcdsaCurve, EcdsaKeyId, EcdsaPublicKeyArgs, EcdsaPublicKeyResult,
+    HttpHeader as CanisterHttpHeader, HttpMethod, HttpRequestArgs, HttpRequestResult,
     SchnorrAlgorithm, SchnorrKeyId, SchnorrPublicKeyArgs, SchnorrPublicKeyResult,
-    SignWithSchnorrArgs, SignWithSchnorrResult,
+    SignWithEcdsaArgs, SignWithEcdsaResult, SignWithSchnorrArgs, SignWithSchnorrResult,
+    TransformArgs,
 };
 use ic_principal::Principal;
 use ic_ledger_types::{
@@ -20,15 +24,45 @@ use ic_stable_structures::{
 };
 use sha2::{Digest, Sha256, Sha224};
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use bs58;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use lazy_static::lazy_static;
 use base64::engine::general_purpose;
 use base64::Engine as _;
-use candid::{CandidType, Deserialize};
+use candid::{CandidType, Deserialize, Nat};
+use ripemd::Ripemd160;
+use serde_json::{json, Value};
 use hex;
 
 const SOL_RPC_CANISTER: &str = "tghme-zyaaa-aaaar-qarca-cai";
+const SOLANA_HTTP_RPC_URL: &str = "https://api.mainnet-beta.solana.com";
+const DOGE_PROVIDER_BASE_URL: &str = "https://api.blockcypher.com/v1/doge/main";
+const DOGE_P2PKH_PREFIX: u8 = 0x1e;
+const DOGE_P2SH_PREFIX: u8 = 0x16;
+const SOL_TRANSFORM_BALANCE: &str = "sol_balance";
+const DOGE_TRANSFORM_BALANCE: &str = "doge_balance";
+const DOGE_TRANSFORM_TX_NEW: &str = "doge_tx_new";
+const DOGE_TRANSFORM_TX_SEND: &str = "doge_tx_send";
+const SECP256K1_ORDER: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+    0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b,
+    0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
+];
+const SECP256K1_HALF_ORDER: [u8; 32] = [
+    0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d,
+    0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
+];
+
+fn threshold_key_name() -> &'static str {
+    match option_env!("DFX_NETWORK") {
+        Some("local") => "dfx_test_key",
+        _ => "key_1",
+    }
+}
 
 lazy_static! {
     static ref SOL_RPC_PRINCIPAL: Principal = Principal::from_text(SOL_RPC_CANISTER).unwrap();
@@ -37,7 +71,11 @@ lazy_static! {
     ).unwrap();
     static ref KEY_ID: SchnorrKeyId = SchnorrKeyId {
         algorithm: SchnorrAlgorithm::Ed25519,
-        name: "key_1".to_string()
+        name: threshold_key_name().to_string()
+    };
+    static ref ECDSA_KEY_ID: EcdsaKeyId = EcdsaKeyId {
+        curve: EcdsaCurve::Secp256k1,
+        name: threshold_key_name().to_string(),
     };
 }
 
@@ -223,6 +261,13 @@ struct CompiledInstrLike {
     data: Vec<u8>,
 }
 
+#[derive(Clone)]
+struct DogeKeyMaterial {
+    path_seed: Vec<u8>,
+    compressed_pubkey: Vec<u8>,
+    address: String,
+}
+
 /* ------------------------------ helpers ------------------------------ */
 
 fn derive_subaccount(sol_pubkey: &str) -> Subaccount {
@@ -310,6 +355,644 @@ fn serialize_message(header: [u8; 3], accounts: &Vec<[u8; 32]>, blockhash: [u8; 
         ser.extend(&i.data);
     }
     ser
+}
+
+fn double_sha256(bytes: &[u8]) -> [u8; 32] {
+    let first = Sha256::digest(bytes);
+    let second = Sha256::digest(first);
+    second.into()
+}
+
+fn base58check_encode(payload: &[u8]) -> String {
+    let checksum = double_sha256(payload);
+    let mut full = Vec::with_capacity(payload.len() + 4);
+    full.extend_from_slice(payload);
+    full.extend_from_slice(&checksum[..4]);
+    bs58::encode(full).into_string()
+}
+
+fn decode_base58check(value: &str) -> Result<Vec<u8>, String> {
+    let raw = bs58::decode(value)
+        .into_vec()
+        .map_err(|_| "Invalid Base58 value".to_string())?;
+
+    if raw.len() < 5 {
+        return Err("Invalid Base58Check payload".into());
+    }
+
+    let payload_len = raw.len() - 4;
+    let (payload, checksum) = raw.split_at(payload_len);
+    let expected = double_sha256(payload);
+    if checksum != &expected[..4] {
+        return Err("Invalid Base58Check checksum".into());
+    }
+
+    Ok(payload.to_vec())
+}
+
+fn validate_doge_address(address: &str) -> Result<(), String> {
+    let payload = decode_base58check(address)?;
+    if payload.len() != 21 {
+        return Err("Invalid DOGE address length".into());
+    }
+
+    match payload[0] {
+        DOGE_P2PKH_PREFIX | DOGE_P2SH_PREFIX => Ok(()),
+        _ => Err("Unsupported DOGE address type".into()),
+    }
+}
+
+fn doge_address_from_compressed_pubkey(compressed_pubkey: &[u8]) -> Result<String, String> {
+    if compressed_pubkey.len() != 33 {
+        return Err("Invalid compressed secp256k1 public key length".into());
+    }
+
+    let sha_hash = Sha256::digest(compressed_pubkey);
+    let pubkey_hash = Ripemd160::digest(sha_hash);
+
+    let mut payload = Vec::with_capacity(21);
+    payload.push(DOGE_P2PKH_PREFIX);
+    payload.extend_from_slice(&pubkey_hash);
+    Ok(base58check_encode(&payload))
+}
+
+fn cmp_be(lhs: &[u8], rhs: &[u8]) -> Ordering {
+    debug_assert_eq!(lhs.len(), rhs.len());
+    for (l, r) in lhs.iter().zip(rhs.iter()) {
+        match l.cmp(r) {
+            Ordering::Equal => continue,
+            non_eq => return non_eq,
+        }
+    }
+    Ordering::Equal
+}
+
+fn sub_be(minuend: &[u8], subtrahend: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(minuend.len(), subtrahend.len());
+    let mut out = vec![0u8; minuend.len()];
+    let mut borrow = 0i16;
+
+    for idx in (0..minuend.len()).rev() {
+        let lhs = minuend[idx] as i16 - borrow;
+        let rhs = subtrahend[idx] as i16;
+        if lhs >= rhs {
+            out[idx] = (lhs - rhs) as u8;
+            borrow = 0;
+        } else {
+            out[idx] = (lhs + 256 - rhs) as u8;
+            borrow = 1;
+        }
+    }
+
+    out
+}
+
+fn der_encode_integer_component(component: &[u8]) -> Vec<u8> {
+    let trimmed = component
+        .iter()
+        .position(|byte| *byte != 0)
+        .map(|start| component[start..].to_vec())
+        .unwrap_or_else(|| vec![0]);
+
+    if trimmed[0] & 0x80 != 0 {
+        let mut prefixed = Vec::with_capacity(trimmed.len() + 1);
+        prefixed.push(0);
+        prefixed.extend(trimmed);
+        prefixed
+    } else {
+        trimmed
+    }
+}
+
+fn der_encode_secp256k1_signature(compact_signature: &[u8]) -> Result<Vec<u8>, String> {
+    if compact_signature.len() != 64 {
+        return Err("Invalid secp256k1 signature length".into());
+    }
+
+    let mut normalized = [0u8; 64];
+    normalized.copy_from_slice(compact_signature);
+
+    if cmp_be(&normalized[32..], &SECP256K1_HALF_ORDER) == Ordering::Greater {
+        let low_s = sub_be(&SECP256K1_ORDER, &normalized[32..]);
+        normalized[32..].copy_from_slice(&low_s);
+    }
+
+    let r = der_encode_integer_component(&normalized[..32]);
+    let s = der_encode_integer_component(&normalized[32..]);
+
+    let mut der = Vec::with_capacity(r.len() + s.len() + 6);
+    der.push(0x30);
+    der.push((r.len() + s.len() + 4) as u8);
+    der.push(0x02);
+    der.push(r.len() as u8);
+    der.extend(r);
+    der.push(0x02);
+    der.push(s.len() as u8);
+    der.extend(s);
+    Ok(der)
+}
+
+fn blockcypher_error_message(status: u16, body: &[u8]) -> String {
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        if let Some(errors) = value.get("errors").and_then(Value::as_array) {
+            let joined = errors
+                .iter()
+                .filter_map(|item| match item {
+                    Value::String(s) => Some(s.clone()),
+                    other => Some(other.to_string()),
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+
+            if !joined.is_empty() {
+                return format!("DOGE provider error ({status}): {joined}");
+            }
+        }
+
+        if let Some(message) = value.get("error").and_then(Value::as_str) {
+            return format!("DOGE provider error ({status}): {message}");
+        }
+    }
+
+    let fallback = String::from_utf8_lossy(body).trim().to_string();
+    if fallback.is_empty() {
+        format!("DOGE provider request failed with status {status}")
+    } else {
+        format!("DOGE provider error ({status}): {fallback}")
+    }
+}
+
+fn json_string_array(value: &Value, field: &str) -> Result<Vec<String>, String> {
+    let arr = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("DOGE provider response missing `{field}`"))?;
+
+    arr.iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| format!("DOGE provider response has non-string `{field}` entry"))
+        })
+        .collect()
+}
+
+fn solana_error_message(status: u16, body: &[u8]) -> String {
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        if let Some(message) = value
+            .get("error")
+            .and_then(|err| err.get("message"))
+            .and_then(Value::as_str)
+        {
+            return format!("Solana RPC error ({status}): {message}");
+        }
+    }
+
+    let fallback = String::from_utf8_lossy(body).trim().to_string();
+    if fallback.is_empty() {
+        format!("Solana RPC request failed with status {status}")
+    } else {
+        format!("Solana RPC error ({status}): {fallback}")
+    }
+}
+
+fn canonical_solana_error_body(status: u16, body: &[u8]) -> Vec<u8> {
+    let message = solana_error_message(status, body);
+    serde_json::to_vec(&json!({ "error": message }))
+        .unwrap_or_else(|_| br#"{"error":"Solana RPC request failed"}"#.to_vec())
+}
+
+fn canonicalize_solana_balance(body: &[u8]) -> Result<Vec<u8>, String> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|e| format!("Failed to parse Solana balance JSON: {e}"))?;
+
+    let lamports = value
+        .get("result")
+        .and_then(|result| result.get("value"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "Solana RPC response missing `result.value`".to_string())?;
+
+    serde_json::to_vec(&json!({ "value": lamports }))
+        .map_err(|e| format!("Failed to encode canonical Solana balance response: {e}"))
+}
+
+fn canonical_blockcypher_error_body(status: u16, body: &[u8]) -> Vec<u8> {
+    let mut errors = Vec::new();
+
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        if let Some(arr) = value.get("errors").and_then(Value::as_array) {
+            for item in arr {
+                match item {
+                    Value::String(s) => errors.push(s.clone()),
+                    Value::Object(obj) => {
+                        if let Some(message) = obj.get("error").and_then(Value::as_str) {
+                            errors.push(message.to_string());
+                        } else {
+                            errors.push(item.to_string());
+                        }
+                    }
+                    other => errors.push(other.to_string()),
+                }
+            }
+        }
+
+        if let Some(message) = value.get("error").and_then(Value::as_str) {
+            errors.push(message.to_string());
+        }
+    }
+
+    if errors.is_empty() {
+        errors.push(format!("DOGE provider request failed with status {status}"));
+    }
+
+    errors.sort();
+    errors.dedup();
+
+    serde_json::to_vec(&json!({ "errors": errors }))
+        .unwrap_or_else(|_| br#"{"errors":["DOGE provider request failed"]}"#.to_vec())
+}
+
+fn canonicalize_blockcypher_tx_new(body: &[u8]) -> Result<Vec<u8>, String> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|e| format!("Failed to parse DOGE tx skeleton JSON: {e}"))?;
+
+    let tosign = json_string_array(&value, "tosign")?;
+    let tx_obj = value
+        .get("tx")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "DOGE provider response missing `tx`".to_string())?;
+
+    let mut tx = tx_obj.clone();
+    for key in [
+        "hash",
+        "size",
+        "block_height",
+        "block_index",
+        "confirmations",
+        "double_spend",
+        "received",
+        "relayed_by",
+    ] {
+        tx.remove(key);
+    }
+
+    serde_json::to_vec(&json!({
+        "tx": Value::Object(tx),
+        "tosign": tosign,
+        "signatures": [],
+        "pubkeys": [],
+    }))
+    .map_err(|e| format!("Failed to encode canonical DOGE tx skeleton: {e}"))
+}
+
+fn canonicalize_blockcypher_tx_send(body: &[u8]) -> Result<Vec<u8>, String> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|e| format!("Failed to parse DOGE tx send JSON: {e}"))?;
+
+    let hash = value
+        .get("tx")
+        .and_then(|tx| tx.get("hash"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "DOGE provider response missing broadcast transaction hash".to_string())?;
+
+    serde_json::to_vec(&json!({
+        "tx": { "hash": hash }
+    }))
+    .map_err(|e| format!("Failed to encode canonical DOGE send response: {e}"))
+}
+
+fn canonicalize_blockcypher_tx_hash(hash: &str) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&json!({
+        "tx": { "hash": hash }
+    }))
+    .map_err(|e| format!("Failed to encode canonical DOGE send response: {e}"))
+}
+
+fn duplicate_tx_hash_from_text(text: &str) -> Option<String> {
+    let marker = "Transaction with hash ";
+    let start = text.find(marker)? + marker.len();
+    let candidate: String = text[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_hexdigit())
+        .collect();
+
+    if candidate.len() == 64 {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn duplicate_tx_hash_from_blockcypher_error_body(body: &[u8]) -> Option<String> {
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        if let Some(arr) = value.get("errors").and_then(Value::as_array) {
+            for item in arr {
+                let text = match item {
+                    Value::String(s) => s.as_str(),
+                    Value::Object(obj) => obj.get("error").and_then(Value::as_str).unwrap_or(""),
+                    _ => "",
+                };
+
+                if text.to_ascii_lowercase().contains("already exists") {
+                    if let Some(hash) = duplicate_tx_hash_from_text(text) {
+                        return Some(hash);
+                    }
+                }
+            }
+        }
+
+        if let Some(message) = value.get("error").and_then(Value::as_str) {
+            if message.to_ascii_lowercase().contains("already exists") {
+                if let Some(hash) = duplicate_tx_hash_from_text(message) {
+                    return Some(hash);
+                }
+            }
+        }
+    }
+
+    let fallback = String::from_utf8_lossy(body);
+    if fallback.to_ascii_lowercase().contains("already exists") {
+        return duplicate_tx_hash_from_text(&fallback);
+    }
+
+    None
+}
+
+fn canonicalize_blockcypher_balance(body: &[u8]) -> Result<Vec<u8>, String> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|e| format!("Failed to parse DOGE balance JSON: {e}"))?;
+
+    let final_balance = value
+        .get("final_balance")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "DOGE provider response missing `final_balance`".to_string())?;
+
+    serde_json::to_vec(&json!({
+        "final_balance": final_balance
+    }))
+    .map_err(|e| format!("Failed to encode canonical DOGE balance response: {e}"))
+}
+
+fn canonicalize_blockcypher_success(context: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+    match context {
+        DOGE_TRANSFORM_BALANCE => canonicalize_blockcypher_balance(body),
+        DOGE_TRANSFORM_TX_NEW => canonicalize_blockcypher_tx_new(body),
+        DOGE_TRANSFORM_TX_SEND => canonicalize_blockcypher_tx_send(body),
+        _ => Err(format!("Unknown DOGE transform context: {context}")),
+    }
+}
+
+async fn doge_http_json(
+    method: HttpMethod,
+    path: &str,
+    body: Option<Vec<u8>>,
+    max_response_bytes: u64,
+    transform_context: &str,
+) -> Result<Value, String> {
+    let mut headers = vec![
+        CanisterHttpHeader {
+            name: "Accept".into(),
+            value: "application/json".into(),
+        },
+        CanisterHttpHeader {
+            name: "User-Agent".into(),
+            value: "ic-sol-wallet-doge/1.0".into(),
+        },
+    ];
+
+    if body.is_some() {
+        headers.push(CanisterHttpHeader {
+            name: "Content-Type".into(),
+            value: "application/json".into(),
+        });
+
+        if transform_context == DOGE_TRANSFORM_TX_SEND {
+            let idempotency_key = body
+                .as_ref()
+                .map(|bytes| hex::encode(Sha256::digest(bytes)))
+                .unwrap_or_default();
+
+            headers.push(CanisterHttpHeader {
+                name: "Idempotency-Key".into(),
+                value: format!("doge-send-{idempotency_key}"),
+            });
+        }
+    }
+
+    let request = HttpRequestArgs {
+        url: format!("{}{}", DOGE_PROVIDER_BASE_URL, path),
+        max_response_bytes: Some(max_response_bytes),
+        method,
+        headers,
+        body,
+        transform: Some(transform_context_from_query(
+            "transform_blockcypher_response".to_string(),
+            transform_context.as_bytes().to_vec(),
+        )),
+    };
+
+    let response = http_request(&request)
+        .await
+        .map_err(|e| format!("DOGE HTTPS outcall failed: {e}"))?;
+
+    let status = response.status.to_string().parse::<u16>().unwrap_or(0);
+    if !(200..300).contains(&status) {
+        return Err(blockcypher_error_message(status, &response.body));
+    }
+
+    serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to decode DOGE provider JSON: {e}"))
+}
+
+async fn sol_get_balance_http_lamports(pubkey: &str) -> Result<u64, String> {
+    let request_body = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getBalance",
+        "params": [pubkey, { "commitment": "finalized" }],
+    }))
+    .map_err(|e| format!("Failed to encode Solana RPC request: {e}"))?;
+
+    let request = HttpRequestArgs {
+        url: SOLANA_HTTP_RPC_URL.to_string(),
+        max_response_bytes: Some(4_096),
+        method: HttpMethod::POST,
+        headers: vec![
+            CanisterHttpHeader {
+                name: "Accept".into(),
+                value: "application/json".into(),
+            },
+            CanisterHttpHeader {
+                name: "Content-Type".into(),
+                value: "application/json".into(),
+            },
+            CanisterHttpHeader {
+                name: "User-Agent".into(),
+                value: "ic-sol-wallet-sol/1.0".into(),
+            },
+            CanisterHttpHeader {
+                name: "Host".into(),
+                value: "api.mainnet-beta.solana.com".into(),
+            },
+        ],
+        body: Some(request_body),
+        transform: Some(transform_context_from_query(
+            "transform_solana_rpc_response".to_string(),
+            SOL_TRANSFORM_BALANCE.as_bytes().to_vec(),
+        )),
+    };
+
+    let response = http_request(&request)
+        .await
+        .map_err(|e| format!("SOL HTTPS outcall failed: {e}"))?;
+
+    let status = response.status.to_string().parse::<u16>().unwrap_or(0);
+    if !(200..300).contains(&status) {
+        return Err(solana_error_message(status, &response.body));
+    }
+
+    let body: Value = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to decode Solana RPC JSON: {e}"))?;
+
+    body.get("value")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "Solana RPC canonical response missing `value`".into())
+}
+
+async fn doge_get_balance_satoshis(address: &str) -> Result<u64, String> {
+    validate_doge_address(address)?;
+    let body = doge_http_json(
+        HttpMethod::GET,
+        &format!("/addrs/{address}/balance"),
+        None,
+        4_096,
+        DOGE_TRANSFORM_BALANCE,
+    )
+    .await?;
+
+    body.get("final_balance")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "DOGE provider response missing `final_balance`".into())
+}
+
+async fn doge_create_tx_skeleton(from_address: &str, to_address: &str, amount: u64) -> Result<Value, String> {
+    validate_doge_address(from_address)?;
+    validate_doge_address(to_address)?;
+    if amount == 0 {
+        return Err("DOGE amount must be greater than zero".into());
+    }
+
+    let request = json!({
+        "inputs": [{ "addresses": [from_address] }],
+        "outputs": [{ "addresses": [to_address], "value": amount }],
+        "confirmations": 1,
+        "preference": "medium"
+    });
+
+    let request_body = serde_json::to_vec(&request)
+        .map_err(|e| format!("Failed to encode DOGE transaction request: {e}"))?;
+
+    doge_http_json(
+        HttpMethod::POST,
+        "/txs/new",
+        Some(request_body),
+        32_768,
+        DOGE_TRANSFORM_TX_NEW,
+    )
+    .await
+}
+
+async fn ecdsa_key_material_for_path(path_seed: Vec<u8>) -> Result<DogeKeyMaterial, String> {
+    let args = EcdsaPublicKeyArgs {
+        canister_id: None,
+        derivation_path: vec![path_seed.clone()],
+        key_id: ECDSA_KEY_ID.clone(),
+    };
+
+    let reply: EcdsaPublicKeyResult = ecdsa_public_key(&args)
+        .await
+        .map_err(|e| format!("Failed to derive DOGE public key: {e}"))?;
+
+    let address = doge_address_from_compressed_pubkey(&reply.public_key)?;
+    Ok(DogeKeyMaterial {
+        path_seed,
+        compressed_pubkey: reply.public_key,
+        address,
+    })
+}
+
+async fn ii_doge_key_material(caller: &Principal) -> Result<DogeKeyMaterial, String> {
+    ecdsa_key_material_for_path(caller.as_slice().to_vec()).await
+}
+
+async fn doge_key_material_from_wallet(sol_pubkey: &str) -> Result<DogeKeyMaterial, String> {
+    let path_seed = bs58::decode(sol_pubkey)
+        .into_vec()
+        .map_err(|_| "Invalid Solana pubkey".to_string())?;
+
+    if path_seed.len() != 32 {
+        return Err("Invalid Solana pubkey".into());
+    }
+
+    ecdsa_key_material_for_path(path_seed).await
+}
+
+async fn doge_sign_tosign_hashes(path_seed: &[u8], tosign: &[String]) -> Result<Vec<String>, String> {
+    let mut signatures = Vec::with_capacity(tosign.len());
+
+    for hash_hex in tosign {
+        let hash = hex::decode(hash_hex).map_err(|_| "DOGE provider returned invalid hex to sign".to_string())?;
+        if hash.len() != 32 {
+            return Err("DOGE provider returned a non-32-byte signing payload".into());
+        }
+
+        let args = SignWithEcdsaArgs {
+            message_hash: hash,
+            derivation_path: vec![path_seed.to_vec()],
+            key_id: ECDSA_KEY_ID.clone(),
+        };
+
+        let reply: SignWithEcdsaResult = sign_with_ecdsa(&args)
+            .await
+            .map_err(|e| format!("Failed to sign DOGE transaction: {e}"))?;
+
+        let der_signature = der_encode_secp256k1_signature(&reply.signature)?;
+        signatures.push(hex::encode(der_signature));
+    }
+
+    Ok(signatures)
+}
+
+async fn doge_transfer_with_material(material: &DogeKeyMaterial, to_address: &str, amount: u64) -> Result<String, String> {
+    let mut skeleton = doge_create_tx_skeleton(&material.address, to_address, amount).await?;
+    let tosign = json_string_array(&skeleton, "tosign")?;
+    if tosign.is_empty() {
+        return Err("DOGE provider did not return any inputs to sign".into());
+    }
+
+    let signatures = doge_sign_tosign_hashes(&material.path_seed, &tosign).await?;
+    let pubkey_hex = hex::encode(&material.compressed_pubkey);
+
+    skeleton["signatures"] = json!(signatures);
+    skeleton["pubkeys"] = json!(vec![pubkey_hex; tosign.len()]);
+
+    let request_body = serde_json::to_vec(&skeleton)
+        .map_err(|e| format!("Failed to encode DOGE signed transaction: {e}"))?;
+
+    let sent = doge_http_json(
+        HttpMethod::POST,
+        "/txs/send",
+        Some(request_body),
+        32_768,
+        DOGE_TRANSFORM_TX_SEND,
+    )
+    .await?;
+    sent.get("tx")
+        .and_then(|tx| tx.get("hash"))
+        .and_then(Value::as_str)
+        .map(|hash| hash.to_string())
+        .ok_or_else(|| "DOGE provider response missing broadcast transaction hash".into())
 }
 
 /* ----------- dynamic cycles helper (shared) ----------- */
@@ -461,6 +1144,11 @@ fn read_or_init_nonce(key: &str) -> u64 {
 /* ------------------------------ SOL RPC calls ------------------------------ */
 
 async fn sol_get_balance_lamports(pubkey: String) -> Result<u64, String> {
+    match sol_get_balance_http_lamports(&pubkey).await {
+        Ok(lamports) => return Ok(lamports),
+        Err(err) => ic_cdk::println!("sol_get_balance_lamports HTTP path failed, falling back to Sol RPC canister: {}", err),
+    }
+
     let rpc_sources = RpcSources::Default(SolanaCluster::Mainnet);
     let rpc_cfg: Option<RpcConfig> = None;
 
@@ -597,7 +1285,108 @@ fn link_sol_pubkey(_sol_pubkey: String, _signature: Vec<u8>) -> String {
     "Wallet linking is no longer supported. Use Internet Identity or Phantom directly.".into()
 }
 
+#[query]
+fn transform_blockcypher_response(args: TransformArgs) -> HttpRequestResult {
+    let context = String::from_utf8(args.context).unwrap_or_default();
+    let status = args.response.status.to_string().parse::<u16>().unwrap_or(500);
+
+    let duplicate_send_hash = if context == DOGE_TRANSFORM_TX_SEND {
+        duplicate_tx_hash_from_blockcypher_error_body(&args.response.body)
+    } else {
+        None
+    };
+
+    let (canonical_status, canonical_body) = if let Some(hash) = duplicate_send_hash {
+        match canonicalize_blockcypher_tx_hash(&hash) {
+            Ok(body) => (200u16, body),
+            Err(e) => (
+                500u16,
+                serde_json::to_vec(&json!({ "errors": [e] }))
+                    .unwrap_or_else(|_| br#"{"errors":["DOGE transform failed"]}"#.to_vec()),
+            ),
+        }
+    } else if (200..300).contains(&status) {
+        match canonicalize_blockcypher_success(&context, &args.response.body) {
+            Ok(body) => (200u16, body),
+            Err(e) => (
+                500u16,
+                serde_json::to_vec(&json!({ "errors": [e] }))
+                    .unwrap_or_else(|_| br#"{"errors":["DOGE transform failed"]}"#.to_vec()),
+            ),
+        }
+    } else {
+        (status, canonical_blockcypher_error_body(status, &args.response.body))
+    };
+
+    HttpRequestResult {
+        status: Nat::from(canonical_status),
+        headers: vec![],
+        body: canonical_body,
+    }
+}
+
+#[query]
+fn transform_solana_rpc_response(args: TransformArgs) -> HttpRequestResult {
+    let context = String::from_utf8(args.context).unwrap_or_default();
+    let status = args.response.status.to_string().parse::<u16>().unwrap_or(500);
+
+    let (canonical_status, canonical_body) = if (200..300).contains(&status) {
+        match context.as_str() {
+            SOL_TRANSFORM_BALANCE => match canonicalize_solana_balance(&args.response.body) {
+                Ok(body) => (200u16, body),
+                Err(e) => (
+                    500u16,
+                    serde_json::to_vec(&json!({ "error": e }))
+                        .unwrap_or_else(|_| br#"{"error":"Solana transform failed"}"#.to_vec()),
+                ),
+            },
+            _ => (
+                500u16,
+                serde_json::to_vec(&json!({ "error": format!("Unknown Solana transform context: {context}") }))
+                    .unwrap_or_else(|_| br#"{"error":"Unknown Solana transform context"}"#.to_vec()),
+            ),
+        }
+    } else {
+        (status, canonical_solana_error_body(status, &args.response.body))
+    };
+
+    HttpRequestResult {
+        status: Nat::from(canonical_status),
+        headers: vec![],
+        body: canonical_body,
+    }
+}
+
 /* ---------- II-only variants ---------- */
+
+#[update]
+async fn get_doge_deposit_address_ii() -> String {
+    let caller = require_authenticated_caller();
+    ii_doge_key_material(&caller)
+        .await
+        .unwrap_or_else(|e| trap(&format!("Failed to derive DOGE address: {e}")))
+        .address
+}
+
+#[update]
+async fn get_doge_balance_ii() -> u64 {
+    let caller = require_authenticated_caller();
+    let material = match ii_doge_key_material(&caller).await {
+        Ok(material) => material,
+        Err(e) => {
+            ic_cdk::println!("get_doge_balance_ii derive error: {}", e);
+            return 0;
+        }
+    };
+
+    match doge_get_balance_satoshis(&material.address).await {
+        Ok(balance) => balance,
+        Err(e) => {
+            ic_cdk::println!("get_doge_balance_ii error: {}", e);
+            0
+        }
+    }
+}
 
 #[update]
 async fn get_sol_deposit_address_ii() -> String {
@@ -646,6 +1435,30 @@ async fn get_nonce_ii() -> u64 {
     let caller = require_authenticated_caller();
     let sol_pk_str = ii_wallet_seed_for_principal(&caller).await;
     read_or_init_nonce(&sol_pk_str)
+}
+
+#[update]
+async fn transfer_doge_ii(to: String, amount: u64) -> String {
+    let caller = require_authenticated_caller();
+    let sol_pk_str = ii_wallet_seed_for_principal(&caller).await;
+    let current_nonce = read_or_init_nonce(&sol_pk_str);
+
+    let material = match ii_doge_key_material(&caller).await {
+        Ok(material) => material,
+        Err(e) => return format!("DOGE wallet derivation failed: {e}"),
+    };
+
+    let txid = match doge_transfer_with_material(&material, &to, amount).await {
+        Ok(txid) => txid,
+        Err(e) => return format!("Send failed: {e}"),
+    };
+
+    NONCE_MAP.with(|map| {
+        let mut map = map.borrow_mut();
+        map.insert(sol_pk_str.clone(), current_nonce + 1);
+    });
+
+    format!("Transfer successful: DOGE txid {}", txid)
 }
 
 #[update]
@@ -811,6 +1624,33 @@ fn get_pid(sol_pubkey: String) -> String {
 }
 
 #[update]
+async fn get_doge_deposit_address(sol_pubkey: String) -> String {
+    doge_key_material_from_wallet(&sol_pubkey)
+        .await
+        .unwrap_or_else(|e| trap(&format!("Failed to derive DOGE address: {e}")))
+        .address
+}
+
+#[update]
+async fn get_doge_balance(sol_pubkey: String) -> u64 {
+    let material = match doge_key_material_from_wallet(&sol_pubkey).await {
+        Ok(material) => material,
+        Err(e) => {
+            ic_cdk::println!("get_doge_balance derive error: {}", e);
+            return 0;
+        }
+    };
+
+    match doge_get_balance_satoshis(&material.address).await {
+        Ok(balance) => balance,
+        Err(e) => {
+            ic_cdk::println!("get_doge_balance error: {}", e);
+            0
+        }
+    }
+}
+
+#[update]
 async fn get_balance(sol_pubkey: String) -> u64 {
     let subaccount = derive_subaccount(&sol_pubkey);
     let account = AccountIdentifier::new(&canister_id(), &subaccount);
@@ -912,6 +1752,36 @@ async fn transfer(to: String, amount: u64, sol_pubkey: String, signature: Vec<u8
         Ok(Err(e)) => format!("Transfer failed: {:?}", e),
         Err(e) => format!("Call error: {:?}", e),
     }
+}
+
+#[update]
+async fn transfer_doge(to: String, amount: u64, sol_pubkey: String, signature: Vec<u8>, nonce: u64) -> String {
+    let current_nonce = get_nonce(sol_pubkey.clone());
+    if nonce != current_nonce {
+        return "Invalid nonce".to_string();
+    }
+
+    let message = format!("transfer_doge to {} amount {} nonce {}", to, amount, nonce);
+    if let Err(e) = require_phantom_signature(&sol_pubkey, message.as_bytes(), &signature) {
+        return e;
+    }
+
+    let material = match doge_key_material_from_wallet(&sol_pubkey).await {
+        Ok(material) => material,
+        Err(e) => return format!("DOGE wallet derivation failed: {e}"),
+    };
+
+    let txid = match doge_transfer_with_material(&material, &to, amount).await {
+        Ok(txid) => txid,
+        Err(e) => return format!("Send failed: {e}"),
+    };
+
+    NONCE_MAP.with(|map| {
+        let mut map = map.borrow_mut();
+        map.insert(sol_pubkey.clone(), current_nonce + 1);
+    });
+
+    format!("Transfer successful: DOGE txid {}", txid)
 }
 
 #[update]

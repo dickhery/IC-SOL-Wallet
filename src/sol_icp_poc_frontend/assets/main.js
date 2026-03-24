@@ -12,6 +12,7 @@ const serviceFeeSolICP = 0.0002;
 const icpLedgerFee = 0.0001;
 const networkFeeICP = 0.0002;
 const solanaFeeApprox = 0.000005;
+const dogeSatoshisPerDoge = 1e8;
 const serviceFeeE8s = BigInt(Math.round(serviceFeeICP * 1e8));
 const serviceFeeSolE8s = BigInt(Math.round(serviceFeeSolICP * 1e8));
 const refreshCooldownMs = 10_000;
@@ -23,12 +24,18 @@ let agent = null;
 let actor = null;
 let authMode = null;
 let solPubkey = null;
+let icpDepositAddress = null;
+let solDepositAddress = null;
+let dogeDepositAddress = null;
 let lastIcpRefreshMs = 0;
 let lastSolRefreshMs = 0;
+let lastDogeRefreshMs = 0;
 let icpRefreshInFlight = false;
 let solRefreshInFlight = false;
+let dogeRefreshInFlight = false;
 let sendingIcp = false;
 let sendingSol = false;
+let sendingDoge = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -80,12 +87,28 @@ function showMuted(message) {
   alertSet("muted", message);
 }
 
+function updateCopyButtons() {
+  $("copy_icp").disabled = !icpDepositAddress;
+  $("copy_sol").disabled = !solDepositAddress;
+  $("copy_doge").disabled = !dogeDepositAddress;
+}
+
+function setWalletAddresses({ icp = null, sol = null, doge = null } = {}) {
+  icpDepositAddress = icp;
+  solDepositAddress = sol;
+  dogeDepositAddress = doge;
+  updateCopyButtons();
+}
+
 function resetWalletDisplay(reason, hint) {
+  setWalletAddresses();
   setText("pid", reason);
   setText("deposit", "ICP deposit address: waiting for authentication");
   setText("balance", "ICP Balance: --");
   setText("sol_deposit", "SOL deposit address: waiting for authentication");
   setText("sol_balance", "SOL Balance: --");
+  setText("doge_deposit", "DOGE deposit address: waiting for authentication");
+  setText("doge_balance", "DOGE Balance: --");
   setText("wallet_hint", hint);
 }
 
@@ -131,6 +154,12 @@ function normalizeAgentError(error) {
   }
   if (/blockhash/i.test(text)) {
     return "A fresh Solana blockhash was not available. Please retry.";
+  }
+  if (/sol https outcall failed/i.test(text) || /solana rpc/i.test(text)) {
+    return "The backend could not fetch the SOL balance from Solana right now. Please retry in a few seconds.";
+  }
+  if (/doge/i.test(text) && /address/i.test(text)) {
+    return "Enter a valid Dogecoin address.";
   }
   return text;
 }
@@ -293,17 +322,20 @@ async function hydrateIiWallet(forceBalances = true) {
 
   try {
     const principal = await actor.whoami();
-    const [deposit, solDeposit] = await Promise.all([
+    const [deposit, solDeposit, dogeDeposit] = await Promise.all([
       friendlyTry(() => actor.get_deposit_address_ii()),
       friendlyTry(() => actor.get_sol_deposit_address_ii()),
+      friendlyTry(() => actor.get_doge_deposit_address_ii()),
     ]);
 
+    setWalletAddresses({ icp: deposit, sol: solDeposit, doge: dogeDeposit });
     setText("pid", `Internet Identity principal: ${principal}`);
     setText("deposit", `ICP deposit address: ${deposit}`);
     setText("sol_deposit", `SOL deposit address: ${solDeposit}`);
+    setText("doge_deposit", `DOGE deposit address: ${dogeDeposit}`);
     setText(
       "wallet_hint",
-      "This wallet is derived from your Internet Identity session."
+      "This wallet is derived from your Internet Identity session across ICP, SOL, and DOGE."
     );
 
     if (forceBalances) {
@@ -326,14 +358,17 @@ async function hydratePhantomWallet(forceBalances = true) {
   await ensureActor();
 
   try {
-    const [deposit, solDeposit] = await Promise.all([
+    const [deposit, solDeposit, dogeDeposit] = await Promise.all([
       friendlyTry(() => actor.get_deposit_address(solPubkey)),
       friendlyTry(() => actor.get_sol_deposit_address(solPubkey)),
+      friendlyTry(() => actor.get_doge_deposit_address(solPubkey)),
     ]);
 
+    setWalletAddresses({ icp: deposit, sol: solDeposit, doge: dogeDeposit });
     setText("pid", `Phantom public key: ${solPubkey}`);
     setText("deposit", `ICP deposit address: ${deposit}`);
     setText("sol_deposit", `SOL deposit address: ${solDeposit}`);
+    setText("doge_deposit", `DOGE deposit address: ${dogeDeposit}`);
     setText(
       "wallet_hint",
       "This wallet is derived from your Phantom public key and requires Phantom signatures for transfers."
@@ -494,10 +529,82 @@ async function refreshSolBalance(force = false, quiet = false) {
   }
 }
 
+async function refreshDogeBalance(force = false, quiet = false) {
+  const now = Date.now();
+  if (!force && now - lastDogeRefreshMs < refreshCooldownMs) {
+    const waitSeconds = Math.ceil((refreshCooldownMs - (now - lastDogeRefreshMs)) / 1000);
+    if (!quiet) {
+      showWarn(`Please wait about ${waitSeconds}s before refreshing DOGE again.`);
+    }
+    return null;
+  }
+  if (dogeRefreshInFlight) {
+    return null;
+  }
+
+  if (!authMode) {
+    setText("doge_balance", "DOGE Balance: --");
+    if (!quiet) {
+      showWarn("Sign in with Internet Identity or connect Phantom before refreshing DOGE.");
+    }
+    return null;
+  }
+  if (authMode === "ii" && !identity) {
+    setText("doge_balance", "DOGE Balance: --");
+    if (!quiet) {
+      showWarn("Sign in with Internet Identity before refreshing the II-managed DOGE balance.");
+    }
+    return null;
+  }
+  if (authMode === "phantom" && !solPubkey) {
+    setText("doge_balance", "DOGE Balance: --");
+    if (!quiet) {
+      showWarn("Connect Phantom before refreshing the Phantom-managed DOGE balance.");
+    }
+    return null;
+  }
+
+  dogeRefreshInFlight = true;
+  $("refresh_doge").disabled = true;
+
+  try {
+    await ensureActor();
+    const satoshis =
+      authMode === "ii"
+        ? await withTimeout(
+            friendlyTry(
+              () => actor.get_doge_balance_ii(),
+              (message) => !quiet && showWarn(message)
+            )
+          )
+        : await withTimeout(
+            friendlyTry(
+              () => actor.get_doge_balance(solPubkey),
+              (message) => !quiet && showWarn(message)
+            )
+          );
+    setText("doge_balance", `DOGE Balance: ${(Number(satoshis) / dogeSatoshisPerDoge).toFixed(8)} DOGE`);
+    lastDogeRefreshMs = Date.now();
+    if (!quiet) {
+      showMuted("DOGE balance updated.");
+    }
+    return satoshis;
+  } catch (error) {
+    if (!quiet) {
+      showErr(normalizeAgentError(error));
+    }
+    return null;
+  } finally {
+    dogeRefreshInFlight = false;
+    $("refresh_doge").disabled = false;
+  }
+}
+
 async function refreshBothBalances(force = false, quiet = false) {
   await Promise.allSettled([
     refreshIcpBalance(force, quiet),
     refreshSolBalance(force, quiet),
+    refreshDogeBalance(force, quiet),
   ]);
 }
 
@@ -543,15 +650,38 @@ async function confirmAfterTimeout(initialNonce, assetType) {
   }
 }
 
-function displayResult(result) {
+function explorerLinkForAsset(result, assetType) {
+  const txidMatch = result.match(/txid (\S+)/i);
+  if (!txidMatch) {
+    return null;
+  }
+
+  if (assetType === "SOL") {
+    return {
+      href: `https://explorer.solana.com/tx/${txidMatch[1]}?cluster=mainnet-beta`,
+      label: "View on Solana Explorer",
+    };
+  }
+
+  if (assetType === "DOGE") {
+    return {
+      href: `https://live.blockcypher.com/doge/tx/${txidMatch[1]}/`,
+      label: "View on BlockCypher",
+    };
+  }
+
+  return null;
+}
+
+function displayTransferResult(result, assetType) {
   if (result.startsWith("Transfer successful")) {
-    const txidMatch = result.match(/txid (\S+)/);
-    if (txidMatch) {
+    const explorer = explorerLinkForAsset(result, assetType);
+    if (explorer) {
       renderLatestTransaction(
         result,
         "ok",
-        `https://explorer.solana.com/tx/${txidMatch[1]}?cluster=mainnet-beta`,
-        "View on Solana Explorer"
+        explorer.href,
+        explorer.label
       );
     } else {
       renderLatestTransaction(result, "ok");
@@ -578,6 +708,32 @@ function validatePositiveAmount(rawValue, label) {
     throw new Error(`Invalid ${label} amount`);
   }
   return parsed;
+}
+
+async function copyText(value, label) {
+  if (!value) {
+    showWarn(`No ${label} is available to copy yet.`);
+    return;
+  }
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const input = document.createElement("textarea");
+      input.value = value;
+      input.setAttribute("readonly", "");
+      input.style.position = "absolute";
+      input.style.left = "-9999px";
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand("copy");
+      document.body.removeChild(input);
+    }
+    showOk(`${label} copied to clipboard.`);
+  } catch (error) {
+    showErr(`Failed to copy ${label}: ${normalizeAgentError(error)}`);
+  }
 }
 
 $("ii_login").onclick = async () => {
@@ -644,12 +800,28 @@ $("logout").onclick = async () => {
   showMuted("Phantom disconnected.");
 };
 
+$("copy_icp").onclick = async () => {
+  await copyText(icpDepositAddress, "ICP address");
+};
+
+$("copy_sol").onclick = async () => {
+  await copyText(solDepositAddress, "SOL address");
+};
+
+$("copy_doge").onclick = async () => {
+  await copyText(dogeDepositAddress, "DOGE address");
+};
+
 $("refresh_icp").onclick = async () => {
   await refreshIcpBalance(false, false);
 };
 
 $("get_sol").onclick = async () => {
   await refreshSolBalance(false, false);
+};
+
+$("refresh_doge").onclick = async () => {
+  await refreshDogeBalance(false, false);
 };
 
 $("send").onclick = async () => {
@@ -697,7 +869,7 @@ $("send").onclick = async () => {
       const result = await withTimeout(
         friendlyTry(() => actor.transfer_ii(to, amount), (message) => showWarn(message))
       );
-      displayResult(result);
+      displayTransferResult(result, "ICP");
       await refreshBothBalances(true, true);
       showOk("ICP transfer submitted through Internet Identity mode.");
     } else if (authMode === "phantom") {
@@ -729,7 +901,7 @@ $("send").onclick = async () => {
           (errorMessage) => showWarn(errorMessage)
         )
       );
-      displayResult(result);
+      displayTransferResult(result, "ICP");
       await refreshBothBalances(true, true);
       showOk("ICP transfer submitted through Phantom mode.");
     } else {
@@ -800,7 +972,7 @@ $("send_sol").onclick = async () => {
       const result = await withTimeout(
         friendlyTry(() => actor.transfer_sol_ii(to, amountLamports), (message) => showWarn(message))
       );
-      displayResult(result);
+      displayTransferResult(result, "SOL");
       await refreshBothBalances(true, true);
       showOk("SOL transfer submitted through Internet Identity mode.");
     } else if (authMode === "phantom") {
@@ -842,7 +1014,7 @@ $("send_sol").onclick = async () => {
           (errorMessage) => showWarn(errorMessage)
         )
       );
-      displayResult(result);
+      displayTransferResult(result, "SOL");
       await refreshBothBalances(true, true);
       showOk("SOL transfer submitted through Phantom mode.");
     } else {
@@ -865,11 +1037,112 @@ $("send_sol").onclick = async () => {
   }
 };
 
+$("send_doge").onclick = async () => {
+  if (sendingDoge) {
+    showWarn("A DOGE transfer is already in progress.");
+    return;
+  }
+
+  sendingDoge = true;
+  $("send_doge").disabled = true;
+  $("send_doge").textContent = "Sending DOGE...";
+
+  let initialNonce = null;
+
+  try {
+    const to = $("to_doge").value.trim();
+    const amountInput = $("amount_doge").value.trim();
+    const amountDoge = validatePositiveAmount(amountInput, "DOGE");
+    const amountSats = BigInt(Math.round(amountDoge * dogeSatoshisPerDoge));
+
+    if (!to) {
+      throw new Error("Enter a destination Dogecoin address.");
+    }
+
+    await ensureActor();
+
+    if (authMode === "ii") {
+      if (!identity) {
+        throw new Error("Sign in with Internet Identity first.");
+      }
+
+      initialNonce = await actor.get_nonce_ii();
+      const confirmed = window.confirm(
+        `Send ${amountDoge.toFixed(8)} DOGE?\n\nDestination: ${to}\nNetwork fee: provider-selected at submission time\nNotes: DOGE miner fees vary with the UTXOs currently available in this wallet.`
+      );
+      if (!confirmed) {
+        throw new Error("Cancelled");
+      }
+
+      const result = await withTimeout(
+        friendlyTry(
+          () => actor.transfer_doge_ii(to, amountSats),
+          (message) => showWarn(message)
+        )
+      );
+      displayTransferResult(result, "DOGE");
+      await refreshBothBalances(true, true);
+      showOk("DOGE transfer submitted through Internet Identity mode.");
+    } else if (authMode === "phantom") {
+      if (!solPubkey) {
+        throw new Error("Connect Phantom first.");
+      }
+
+      const provider = getProvider(true);
+      if (!provider) return;
+
+      initialNonce = await actor.get_nonce(solPubkey);
+      const confirmed = window.confirm(
+        `Send ${amountDoge.toFixed(8)} DOGE?\n\nDestination: ${to}\nNetwork fee: provider-selected at submission time\nNotes: DOGE miner fees vary with the UTXOs currently available in this wallet.`
+      );
+      if (!confirmed) {
+        throw new Error("Cancelled");
+      }
+
+      const message = `transfer_doge to ${to} amount ${amountSats} nonce ${initialNonce}`;
+      const signed = await provider.signMessage(textEncoder.encode(message), "utf8");
+      const result = await withTimeout(
+        friendlyTry(
+          () =>
+            actor.transfer_doge(
+              to,
+              amountSats,
+              solPubkey,
+              Array.from(signed.signature),
+              initialNonce
+            ),
+          (errorMessage) => showWarn(errorMessage)
+        )
+      );
+      displayTransferResult(result, "DOGE");
+      await refreshBothBalances(true, true);
+      showOk("DOGE transfer submitted through Phantom mode.");
+    } else {
+      throw new Error("Sign in with Internet Identity or connect Phantom first.");
+    }
+
+    $("to_doge").value = "";
+    $("amount_doge").value = "";
+  } catch (error) {
+    const message = (error?.message || String(error || "")).toLowerCase();
+    if (message.includes("timed out") || message.includes("processing")) {
+      await confirmAfterTimeout(initialNonce, "DOGE");
+    } else if (error.message !== "Cancelled") {
+      showErr(`DOGE transfer failed: ${normalizeAgentError(error)}`);
+    }
+  } finally {
+    sendingDoge = false;
+    $("send_doge").disabled = false;
+    $("send_doge").textContent = "Send DOGE";
+  }
+};
+
 await restoreIiSession();
 await restoreTrustedPhantomConnection();
 await makeAgentAndActor();
 bindProviderEvents();
 renderConnectionState();
+updateCopyButtons();
 resetLatestTransaction();
 await hydrateActiveWallet(Boolean(identity || solPubkey));
-showMuted("Ready.");
+showMuted("Ready with ICP, SOL, and DOGE.");

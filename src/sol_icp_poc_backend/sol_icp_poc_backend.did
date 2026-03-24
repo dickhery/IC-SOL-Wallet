@@ -1,3 +1,14 @@
+type http_header = record {
+  "name": text;
+  "value": text;
+};
+
+type http_request_result = record {
+  "status": nat;
+  "headers": vec http_header;
+  "body": vec nat8;
+};
+
 service : {
   "whoami": () -> (text) query;
 
@@ -8,6 +19,8 @@ service : {
   // Public reads / addressing
   "get_deposit_address": (text) -> (text) query;
   "get_balance": (text) -> (nat64);
+  "get_doge_deposit_address": (text) -> (text);
+  "get_doge_balance": (text) -> (nat64);
   "get_nonce": (text) -> (nat64);              // update (no 'query')
   "get_pid": (text) -> (text) query;
 
@@ -16,14 +29,26 @@ service : {
 
   // Phantom-signed transfer variants
   "transfer": (text, nat64, text, vec nat8, nat64) -> (text);
+  "transfer_doge": (text, nat64, text, vec nat8, nat64) -> (text);
   "transfer_sol": (text, nat64, text, vec nat8, nat64) -> (text);
 
   // II-only variants
+  "get_doge_deposit_address_ii": () -> (text);
+  "get_doge_balance_ii": () -> (nat64);
   "get_sol_deposit_address_ii": () -> (text);
   "get_deposit_address_ii": () -> (text);
   "get_sol_balance_ii": () -> (nat64);
   "get_balance_ii": () -> (nat64);
   "get_nonce_ii": () -> (nat64);
+  "transfer_doge_ii": (text, nat64) -> (text);
   "transfer_ii": (text, nat64) -> (text);
   "transfer_sol_ii": (text, nat64) -> (text);
+  "transform_blockcypher_response": (record {
+    "response": http_request_result;
+    "context": vec nat8;
+  }) -> (http_request_result) query;
+  "transform_solana_rpc_response": (record {
+    "response": http_request_result;
+    "context": vec nat8;
+  }) -> (http_request_result) query;
 }

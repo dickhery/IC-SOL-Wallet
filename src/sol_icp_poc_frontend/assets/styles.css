@@ -213,7 +213,7 @@ h3 {
 }
 
 .workspace-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .panel,
@@ -315,6 +315,11 @@ button:disabled {
   word-break: break-word;
 }
 
+.address-stack {
+  display: grid;
+  gap: 0.7rem;
+}
+
 .mono-copy {
   margin: 0.35rem 0 0;
   color: var(--ink);
@@ -329,6 +334,10 @@ button:disabled {
   background: rgba(255, 255, 255, 0.78);
   border: 1px solid rgba(80, 53, 28, 0.08);
   color: var(--ink);
+}
+
+.copy-button {
+  justify-self: start;
 }
 
 .metric-card {
@@ -369,6 +378,16 @@ button:disabled {
   display: grid;
   gap: 1rem;
   background: var(--surface-strong);
+}
+
+.doge-card {
+  background:
+    radial-gradient(circle at top right, rgba(189, 93, 56, 0.14), transparent 34%),
+    linear-gradient(180deg, rgba(255, 246, 235, 0.96), rgba(255, 241, 228, 0.9));
+}
+
+.doge-card .metric-card {
+  color: #9f4027;
 }
 
 .transaction-card,
@@ -443,6 +462,12 @@ button:disabled {
   .token-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 1180px) and (min-width: 981px) {
+  .workspace-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

@@ -211,12 +211,6 @@ thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
     static NONCE_MAP: RefCell<StableBTreeMap<String, u64, Memory>> =
         RefCell::new(StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(0)))));
-
-    // Ownership mappings (for optional linking)
-    static OWNER_MAP: RefCell<StableBTreeMap<String, String, Memory>> =
-        RefCell::new(StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(1)))));
-    static PRINCIPAL_MAP: RefCell<StableBTreeMap<String, String, Memory>> =
-        RefCell::new(StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(2)))));
 }
 
 const SERVICE_FEE: u64 = 10_000;     // 0.0001 ICP
@@ -252,34 +246,19 @@ fn require_authenticated_caller() -> Principal {
     caller
 }
 
-fn linked_wallet_for_principal(caller: &Principal) -> Option<String> {
-    let caller_txt = caller.to_text();
-    PRINCIPAL_MAP.with(|m| m.borrow().get(&caller_txt))
+async fn ii_wallet_seed_for_principal(caller: &Principal) -> String {
+    bs58::encode(get_user_sol_pk_for_path(caller.as_slice().to_vec()).await).into_string()
 }
 
-async fn active_wallet_seed_for_principal(caller: Principal) -> String {
-    if let Some(linked_wallet) = linked_wallet_for_principal(&caller) {
-        linked_wallet
-    } else {
-        bs58::encode(get_user_sol_pk_for_path(caller.as_slice().to_vec()).await).into_string()
-    }
+async fn ii_sol_pubkey_for_principal(caller: &Principal) -> [u8; 32] {
+    get_user_sol_pk_for_path(caller.as_slice().to_vec()).await
 }
 
-async fn active_sol_pubkey_for_principal(caller: Principal) -> [u8; 32] {
-    if let Some(linked_wallet) = linked_wallet_for_principal(&caller) {
-        get_user_sol_pk_from_wallet(&linked_wallet).await
+fn require_phantom_signature(sol_pubkey: &str, message: &[u8], signature: &[u8]) -> Result<(), String> {
+    if verify_signature(sol_pubkey, message, signature) {
+        Ok(())
     } else {
-        get_user_sol_pk_for_path(caller.as_slice().to_vec()).await
-    }
-}
-
-fn active_derivation_path_seed_for_principal(caller: &Principal) -> Vec<u8> {
-    if let Some(linked_wallet) = linked_wallet_for_principal(caller) {
-        bs58::decode(linked_wallet)
-            .into_vec()
-            .unwrap_or_else(|_| trap("Stored linked wallet is invalid"))
-    } else {
-        caller.as_slice().to_vec()
+        Err("Invalid Phantom signature".into())
     }
 }
 
@@ -465,25 +444,6 @@ async fn get_user_sol_pk_from_wallet(sol_pubkey: &str) -> [u8; 32] {
     get_user_sol_pk_for_path(pubkey_bytes).await
 }
 
-/* ------------------------------ ownership / authorization ------------------------------ */
-
-fn require_owner(sol_pubkey: &str) -> Result<(), String> {
-    let caller_txt = caller_principal().to_text();
-    let owner = OWNER_MAP.with(|m| m.borrow().get(&sol_pubkey.to_string()));
-    match owner {
-        Some(o) if o == caller_txt => Ok(()),
-        Some(_) => Err("Unauthorized: wallet linked to a different Internet Identity".into()),
-        None => Err("Unauthorized: link this Solana wallet to your Internet Identity first".into())
-    }
-}
-
-fn auth_by_phantom_or_owner(sol_pubkey: &str, message: &[u8], signature: &[u8]) -> Result<(), String> {
-    if verify_signature(sol_pubkey, message, signature) {
-        return Ok(());
-    }
-    require_owner(sol_pubkey)
-}
-
 /* -------------------------- nonce helpers (no self-call) -------------------------- */
 
 fn read_or_init_nonce(key: &str) -> u64 {
@@ -629,51 +589,12 @@ fn whoami() -> String {
 
 #[update]
 fn unlink_sol_pubkey() -> String {
-    let principal_txt = require_authenticated_caller().to_text();
-    let linked = PRINCIPAL_MAP.with(|m| m.borrow().get(&principal_txt));
-    match linked {
-        Some(sol_pk) => {
-            OWNER_MAP.with(|m| { m.borrow_mut().remove(&sol_pk); });
-            PRINCIPAL_MAP.with(|m| { m.borrow_mut().remove(&principal_txt); });
-            "Unlinked".into()
-        }
-        None => "No link found".into(),
-    }
+    "Wallet linking is no longer supported. Use Internet Identity or Phantom directly.".into()
 }
 
 #[update]
-fn link_sol_pubkey(sol_pubkey: String, signature: Vec<u8>) -> String {
-    if sol_pubkey.is_empty() { return "Missing pubkey".into(); }
-    let principal_txt = require_authenticated_caller().to_text();
-    let msg = format!("link {}", principal_txt);
-    if !verify_signature(&sol_pubkey, msg.as_bytes(), &signature) {
-        return "Invalid signature".into();
-    }
-
-    if let Some(owner) = OWNER_MAP.with(|m| m.borrow().get(&sol_pubkey)) {
-        if owner == principal_txt {
-            return "Already linked".into();
-        } else {
-            return "This Solana wallet is already linked to a different Internet Identity".into();
-        }
-    }
-
-    if let Some(existing_pk) = PRINCIPAL_MAP.with(|m| m.borrow().get(&principal_txt)) {
-        if existing_pk != sol_pubkey {
-            return format!("This Internet Identity is already linked to {}", existing_pk);
-        }
-    }
-
-    OWNER_MAP.with(|m| { m.borrow_mut().insert(sol_pubkey.clone(), principal_txt.clone()); });
-    PRINCIPAL_MAP.with(|m| { m.borrow_mut().insert(principal_txt.clone(), sol_pubkey.clone()); });
-
-    NONCE_MAP.with(|m| {
-        if m.borrow().get(&sol_pubkey).is_none() {
-            m.borrow_mut().insert(sol_pubkey.clone(), 0);
-        }
-    });
-
-    "Linked".into()
+fn link_sol_pubkey(_sol_pubkey: String, _signature: Vec<u8>) -> String {
+    "Wallet linking is no longer supported. Use Internet Identity or Phantom directly.".into()
 }
 
 /* ---------- II-only variants ---------- */
@@ -681,14 +602,14 @@ fn link_sol_pubkey(sol_pubkey: String, signature: Vec<u8>) -> String {
 #[update]
 async fn get_sol_deposit_address_ii() -> String {
     let caller = require_authenticated_caller();
-    let user_pk = active_sol_pubkey_for_principal(caller).await;
+    let user_pk = ii_sol_pubkey_for_principal(&caller).await;
     bs58::encode(user_pk).into_string()
 }
 
 #[update]
 async fn get_deposit_address_ii() -> String {
     let caller = require_authenticated_caller();
-    let sol_pk_str = active_wallet_seed_for_principal(caller).await;
+    let sol_pk_str = ii_wallet_seed_for_principal(&caller).await;
     let subaccount = derive_subaccount(&sol_pk_str);
     let account = AccountIdentifier::new(&canister_id(), &subaccount);
     hex::encode(account.as_ref())
@@ -697,7 +618,7 @@ async fn get_deposit_address_ii() -> String {
 #[update]
 async fn get_sol_balance_ii() -> u64 {
     let caller = require_authenticated_caller();
-    let pubkey_str = bs58::encode(active_sol_pubkey_for_principal(caller).await).into_string();
+    let pubkey_str = bs58::encode(ii_sol_pubkey_for_principal(&caller).await).into_string();
     match sol_get_balance_lamports(pubkey_str).await {
         Ok(lamports) => lamports,
         Err(e) => {
@@ -710,7 +631,7 @@ async fn get_sol_balance_ii() -> u64 {
 #[update]
 async fn get_balance_ii() -> u64 {
     let caller = require_authenticated_caller();
-    let sol_pk_str = active_wallet_seed_for_principal(caller).await;
+    let sol_pk_str = ii_wallet_seed_for_principal(&caller).await;
     let subaccount = derive_subaccount(&sol_pk_str);
     let account = AccountIdentifier::new(&canister_id(), &subaccount);
     let args = ic_ledger_types::AccountBalanceArgs { account };
@@ -723,14 +644,14 @@ async fn get_balance_ii() -> u64 {
 #[update]
 async fn get_nonce_ii() -> u64 {
     let caller = require_authenticated_caller();
-    let sol_pk_str = active_wallet_seed_for_principal(caller).await;
+    let sol_pk_str = ii_wallet_seed_for_principal(&caller).await;
     read_or_init_nonce(&sol_pk_str)
 }
 
 #[update]
 async fn transfer_ii(to: String, amount: u64) -> String {
     let caller = require_authenticated_caller();
-    let sol_pk_str = active_wallet_seed_for_principal(caller).await;
+    let sol_pk_str = ii_wallet_seed_for_principal(&caller).await;
     let current_nonce = read_or_init_nonce(&sol_pk_str);
 
     let subaccount = derive_subaccount(&sol_pk_str);
@@ -789,7 +710,7 @@ async fn transfer_ii(to: String, amount: u64) -> String {
 #[update]
 async fn transfer_sol_ii(to: String, amount: u64) -> String {
     let caller = require_authenticated_caller();
-    let sol_pk_str = active_wallet_seed_for_principal(caller.clone()).await;
+    let sol_pk_str = ii_wallet_seed_for_principal(&caller).await;
     let current_nonce = read_or_init_nonce(&sol_pk_str);
 
     let subaccount = derive_subaccount(&sol_pk_str);
@@ -820,7 +741,7 @@ async fn transfer_sol_ii(to: String, amount: u64) -> String {
         Err(_) => return "Invalid blockhash".into(),
     };
 
-    let from_pk = active_sol_pubkey_for_principal(caller.clone()).await;
+    let from_pk = ii_sol_pubkey_for_principal(&caller).await;
     let to_pk: [u8; 32] = match bs58::decode(&to).into_vec() {
         Ok(v) => match v.try_into() { Ok(a) => a, Err(_) => return "Invalid to address".into() },
         Err(_) => return "Invalid to address".into(),
@@ -840,7 +761,7 @@ async fn transfer_sol_ii(to: String, amount: u64) -> String {
 
     let sign_args = SignWithSchnorrArgs {
         message: msg_ser.clone(),
-        derivation_path: vec![active_derivation_path_seed_for_principal(&caller)],
+        derivation_path: vec![caller.as_slice().to_vec()],
         key_id: KEY_ID.clone(),
         aux: None,
     };
@@ -936,7 +857,7 @@ async fn transfer(to: String, amount: u64, sol_pubkey: String, signature: Vec<u8
     }
 
     let message = format!("transfer to {} amount {} nonce {} service_fee {}", to, amount, nonce, SERVICE_FEE);
-    if let Err(e) = auth_by_phantom_or_owner(&sol_pubkey, message.as_bytes(), &signature) {
+    if let Err(e) = require_phantom_signature(&sol_pubkey, message.as_bytes(), &signature) {
         return e;
     }
 
@@ -1001,7 +922,7 @@ async fn transfer_sol(to: String, amount: u64, sol_pubkey: String, signature: Ve
     }
 
     let message = format!("transfer_sol to {} amount {} nonce {} service_fee {}", to, amount, nonce, SERVICE_FEE_SOL).into_bytes();
-    if let Err(e) = auth_by_phantom_or_owner(&sol_pubkey, &message, &signature) {
+    if let Err(e) = require_phantom_signature(&sol_pubkey, &message, &signature) {
         return e;
     }
 

@@ -21,7 +21,7 @@ let authClient = null;
 let identity = null;
 let agent = null;
 let actor = null;
-let authMode = "ii";
+let authMode = null;
 let solPubkey = null;
 let lastIcpRefreshMs = 0;
 let lastSolRefreshMs = 0;
@@ -46,14 +46,15 @@ function setBadge(id, label, tone) {
   el.className = `status-badge ${tone}`;
 }
 
-function setModeButtonState() {
-  $("mode_ii").classList.toggle("is-active", authMode === "ii");
-  $("mode_phantom").classList.toggle("is-active", authMode === "phantom");
+function syncAuthModeFromState() {
+  authMode = identity ? "ii" : solPubkey ? "phantom" : null;
   setText(
     "mode_status",
     authMode === "ii"
-      ? "Active wallet: Internet Identity session"
-      : "Active wallet: Phantom-derived wallet"
+      ? "Active wallet: Internet Identity"
+      : authMode === "phantom"
+        ? "Active wallet: Phantom"
+        : "Active wallet: no session connected"
   );
 }
 
@@ -174,6 +175,30 @@ async function makeAgentAndActor() {
   actor = Actor.createActor(idlFactory, { agent, canisterId });
 }
 
+async function logoutIiSession() {
+  await initAuthIfNeeded();
+  try {
+    if (await authClient.isAuthenticated()) {
+      await authClient.logout();
+    }
+  } catch {
+    // Ignore logout failures and still clear local state.
+  }
+  identity = null;
+}
+
+async function disconnectPhantomSession() {
+  const provider = getProvider();
+  if (provider) {
+    try {
+      await provider.disconnect();
+    } catch {
+      // Ignore provider disconnect failures and still clear local state.
+    }
+  }
+  solPubkey = null;
+}
+
 function getProvider(promptInstall = false) {
   const provider = window.phantom?.solana;
   if (provider?.isPhantom) {
@@ -195,16 +220,17 @@ function bindProviderEvents() {
   provider.on("disconnect", () => {
     solPubkey = null;
     renderConnectionState();
-    if (authMode === "phantom") {
+    if (!authMode) {
       resetWalletDisplay(
         "Phantom public key: connect your wallet to load the Phantom-managed account.",
-        "Connect Phantom to derive the shared ICP and SOL wallet from your public key."
+        "Only one authentication method can be active at a time. Connect Phantom or sign in with Internet Identity."
       );
     }
   });
 }
 
 function renderConnectionState() {
+  syncAuthModeFromState();
   setBadge("ii_badge", identity ? "Connected" : "Offline", identity ? "ok" : "muted");
   setBadge(
     "phantom_badge",
@@ -225,22 +251,6 @@ function renderConnectionState() {
       : "Connect Phantom to unlock the Phantom-managed wallet."
   );
   setText("pubkey", solPubkey ? `Phantom public key: ${solPubkey}` : "");
-
-  if (identity && solPubkey) {
-    setText(
-      "link_status",
-      "Both auth methods are connected. Link them if you want II mode to control the Phantom-derived wallet too."
-    );
-  } else if (identity) {
-    setText("link_status", "Connect Phantom to enable wallet linking.");
-  } else {
-    setText(
-      "link_status",
-      "Sign in with Internet Identity and connect Phantom to link the wallet contexts."
-    );
-  }
-
-  setModeButtonState();
 }
 
 async function restoreIiSession() {
@@ -251,6 +261,7 @@ async function restoreIiSession() {
 }
 
 async function restoreTrustedPhantomConnection() {
+  if (identity) return;
   const provider = getProvider();
   if (!provider) return;
 
@@ -273,7 +284,7 @@ async function hydrateIiWallet(forceBalances = true) {
   if (!identity) {
     resetWalletDisplay(
       "Internet Identity principal: sign in to load your wallet.",
-      "II mode can manage its own derived wallet, or a linked Phantom-derived wallet after linking."
+      "Only one authentication method can be active at a time. Sign in with Internet Identity to use the II wallet."
     );
     return;
   }
@@ -292,7 +303,7 @@ async function hydrateIiWallet(forceBalances = true) {
     setText("sol_deposit", `SOL deposit address: ${solDeposit}`);
     setText(
       "wallet_hint",
-      "If this II session is linked to Phantom, the addresses above are already pointing at that linked wallet."
+      "This wallet is derived from your Internet Identity session."
     );
 
     if (forceBalances) {
@@ -307,7 +318,7 @@ async function hydratePhantomWallet(forceBalances = true) {
   if (!solPubkey) {
     resetWalletDisplay(
       "Phantom public key: connect your wallet to load the Phantom-managed account.",
-      "Phantom mode derives a shared ICP subaccount and a Solana address from your wallet public key."
+      "Only one authentication method can be active at a time. Connect Phantom to use the Phantom wallet."
     );
     return;
   }
@@ -325,7 +336,7 @@ async function hydratePhantomWallet(forceBalances = true) {
     setText("sol_deposit", `SOL deposit address: ${solDeposit}`);
     setText(
       "wallet_hint",
-      "Use Phantom signatures for outbound transfers, or link this wallet to II so the II session can manage it too."
+      "This wallet is derived from your Phantom public key and requires Phantom signatures for transfers."
     );
 
     if (forceBalances) {
@@ -340,8 +351,13 @@ async function hydrateActiveWallet(forceBalances = true) {
   renderConnectionState();
   if (authMode === "ii") {
     await hydrateIiWallet(forceBalances);
-  } else {
+  } else if (authMode === "phantom") {
     await hydratePhantomWallet(forceBalances);
+  } else {
+    resetWalletDisplay(
+      "No active wallet session. Sign in with Internet Identity or connect Phantom to continue.",
+      "Only one authentication method can be active at a time."
+    );
   }
 }
 
@@ -358,6 +374,13 @@ async function refreshIcpBalance(force = false, quiet = false) {
     return null;
   }
 
+  if (!authMode) {
+    setText("balance", "ICP Balance: --");
+    if (!quiet) {
+      showWarn("Sign in with Internet Identity or connect Phantom before refreshing ICP.");
+    }
+    return null;
+  }
   if (authMode === "ii" && !identity) {
     setText("balance", "ICP Balance: --");
     if (!quiet) {
@@ -416,6 +439,13 @@ async function refreshSolBalance(force = false, quiet = false) {
     return null;
   }
 
+  if (!authMode) {
+    setText("sol_balance", "SOL Balance: --");
+    if (!quiet) {
+      showWarn("Sign in with Internet Identity or connect Phantom before refreshing SOL.");
+    }
+    return null;
+  }
   if (authMode === "ii" && !identity) {
     setText("sol_balance", "SOL Balance: --");
     if (!quiet) {
@@ -550,29 +580,24 @@ function validatePositiveAmount(rawValue, label) {
   return parsed;
 }
 
-$("mode_ii").onclick = async () => {
-  authMode = "ii";
-  await hydrateActiveWallet(false);
-  showMuted("Internet Identity mode selected.");
-};
-
-$("mode_phantom").onclick = async () => {
-  authMode = "phantom";
-  await hydrateActiveWallet(false);
-  showMuted("Phantom mode selected.");
-};
-
 $("ii_login").onclick = async () => {
   await initAuthIfNeeded();
   authClient.login({
     identityProvider: getIdentityProviderUrl(),
     maxTimeToLive: BigInt(8) * BigInt(3_600_000_000_000),
     onSuccess: async () => {
+      const hadPhantomSession = Boolean(solPubkey);
+      if (hadPhantomSession) {
+        await disconnectPhantomSession();
+      }
       identity = authClient.getIdentity();
-      authMode = "ii";
       await makeAgentAndActor();
       await hydrateActiveWallet(true);
-      showOk("Internet Identity connected.");
+      showOk(
+        hadPhantomSession
+          ? "Internet Identity connected. Phantom was disconnected to keep a single active session."
+          : "Internet Identity connected."
+      );
     },
     onError: (error) => {
       showErr(`Internet Identity login failed: ${normalizeAgentError(error)}`);
@@ -581,19 +606,9 @@ $("ii_login").onclick = async () => {
 };
 
 $("ii_logout").onclick = async () => {
-  await initAuthIfNeeded();
-  await authClient.logout();
-  identity = null;
+  await logoutIiSession();
   await makeAgentAndActor();
-  renderConnectionState();
-
-  if (authMode === "ii") {
-    resetWalletDisplay(
-      "Internet Identity principal: sign in to load your wallet.",
-      "II mode can manage its own derived wallet, or a linked Phantom-derived wallet after linking."
-    );
-  }
-
+  await hydrateActiveWallet(false);
   showMuted("Internet Identity disconnected.");
 };
 
@@ -605,95 +620,28 @@ $("connect").onclick = async () => {
 
   try {
     const response = await provider.connect();
+    const hadIiSession = Boolean(identity);
+    if (hadIiSession) {
+      await logoutIiSession();
+    }
     solPubkey = response.publicKey.toString();
-    authMode = "phantom";
-    await ensureActor();
+    await makeAgentAndActor();
     await hydrateActiveWallet(true);
-    showOk("Phantom connected.");
+    showOk(
+      hadIiSession
+        ? "Phantom connected. Internet Identity was logged out to keep a single active session."
+        : "Phantom connected."
+    );
   } catch (error) {
     showErr(`Phantom connection failed: ${normalizeAgentError(error)}`);
   }
 };
 
 $("logout").onclick = async () => {
-  const provider = getProvider();
-  if (provider) {
-    try {
-      await provider.disconnect();
-    } catch {
-      // Ignore provider disconnect failures.
-    }
-  }
-
-  solPubkey = null;
-  renderConnectionState();
-
-  if (authMode === "phantom") {
-    resetWalletDisplay(
-      "Phantom public key: connect your wallet to load the Phantom-managed account.",
-      "Phantom mode derives a shared ICP subaccount and a Solana address from your wallet public key."
-    );
-  }
-
+  await disconnectPhantomSession();
+  await makeAgentAndActor();
+  await hydrateActiveWallet(false);
   showMuted("Phantom disconnected.");
-};
-
-$("link_wallet").onclick = async () => {
-  if (!identity) {
-    showWarn("Sign in with Internet Identity before linking a Phantom wallet.");
-    return;
-  }
-  if (!solPubkey) {
-    showWarn("Connect Phantom before trying to link the wallet.");
-    return;
-  }
-
-  const provider = getProvider(true);
-  if (!provider) return;
-
-  try {
-    await makeAgentAndActor();
-    const principal = await actor.whoami();
-    const message = `link ${principal}`;
-    const signed = await provider.signMessage(textEncoder.encode(message), "utf8");
-    const result = await friendlyTry(() =>
-      actor.link_sol_pubkey(solPubkey, Array.from(signed.signature))
-    );
-
-    setText(
-      "link_status",
-      result === "Linked" || result === "Already linked"
-        ? `Linked Phantom wallet: ${solPubkey}`
-        : result
-    );
-    showOk(result);
-
-    if (authMode === "ii") {
-      await hydrateIiWallet(true);
-    }
-  } catch (error) {
-    showErr(`Linking failed: ${normalizeAgentError(error)}`);
-  }
-};
-
-$("unlink_wallet").onclick = async () => {
-  if (!identity) {
-    showWarn("Sign in with Internet Identity before unlinking.");
-    return;
-  }
-
-  try {
-    await makeAgentAndActor();
-    const result = await friendlyTry(() => actor.unlink_sol_pubkey());
-    setText("link_status", "The current II session is no longer linked to a Phantom wallet.");
-    showMuted(result);
-
-    if (authMode === "ii") {
-      await hydrateIiWallet(true);
-    }
-  } catch (error) {
-    showErr(`Unlinking failed: ${normalizeAgentError(error)}`);
-  }
 };
 
 $("refresh_icp").onclick = async () => {
@@ -752,7 +700,7 @@ $("send").onclick = async () => {
       displayResult(result);
       await refreshBothBalances(true, true);
       showOk("ICP transfer submitted through Internet Identity mode.");
-    } else {
+    } else if (authMode === "phantom") {
       if (!solPubkey) {
         throw new Error("Connect Phantom first.");
       }
@@ -784,6 +732,8 @@ $("send").onclick = async () => {
       displayResult(result);
       await refreshBothBalances(true, true);
       showOk("ICP transfer submitted through Phantom mode.");
+    } else {
+      throw new Error("Sign in with Internet Identity or connect Phantom first.");
     }
 
     $("to").value = "";
@@ -853,7 +803,7 @@ $("send_sol").onclick = async () => {
       displayResult(result);
       await refreshBothBalances(true, true);
       showOk("SOL transfer submitted through Internet Identity mode.");
-    } else {
+    } else if (authMode === "phantom") {
       if (!solPubkey) {
         throw new Error("Connect Phantom first.");
       }
@@ -895,6 +845,8 @@ $("send_sol").onclick = async () => {
       displayResult(result);
       await refreshBothBalances(true, true);
       showOk("SOL transfer submitted through Phantom mode.");
+    } else {
+      throw new Error("Sign in with Internet Identity or connect Phantom first.");
     }
 
     $("to_sol").value = "";

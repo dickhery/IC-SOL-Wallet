@@ -1,6 +1,7 @@
 service : {
   "whoami": () -> (text) query;
 
+  // Legacy no-op endpoints retained for interface compatibility.
   "link_sol_pubkey": (text, vec nat8) -> (text);
   "unlink_sol_pubkey": () -> (text);
 
@@ -13,7 +14,7 @@ service : {
   "get_sol_deposit_address": (text) -> (text);
   "get_sol_balance": (text) -> (nat64);
 
-  // Transfers (Phantom or II link)
+  // Phantom-signed transfer variants
   "transfer": (text, nat64, text, vec nat8, nat64) -> (text);
   "transfer_sol": (text, nat64, text, vec nat8, nat64) -> (text);
 

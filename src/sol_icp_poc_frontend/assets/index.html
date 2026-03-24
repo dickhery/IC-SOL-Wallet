@@ -18,7 +18,7 @@
           <h1>Run one wallet experience across Internet Identity and Phantom.</h1>
           <p class="lede">
             Authenticate with Internet Identity or connect Phantom, then hold and transfer ICP
-            and SOL from the same app with a clearer, faster operator view.
+            and SOL from the same app. Only one authentication method stays active at a time.
           </p>
         </div>
         <div class="status-dock">
@@ -30,7 +30,7 @@
             <span class="label">Phantom</span>
             <span id="phantom_badge" class="status-badge muted">Offline</span>
           </div>
-          <p id="mode_status" class="mode-status">Active wallet: Internet Identity session</p>
+          <p id="mode_status" class="mode-status">Active wallet: no session connected</p>
         </div>
       </div>
     </section>
@@ -66,41 +66,21 @@
           <button id="logout" class="ghost">Disconnect</button>
         </div>
       </article>
-
-      <article class="panel auth-panel">
-        <div class="panel-head">
-          <div>
-            <p class="panel-kicker">Linking</p>
-            <h2>Blend Both Auth Paths</h2>
-          </div>
-        </div>
-        <p id="link_status" class="support-copy">
-          Sign in with Internet Identity and connect Phantom to link the wallet contexts.
-        </p>
-        <div class="button-row">
-          <button id="link_wallet" class="primary warm-tone">Link Current Phantom Wallet</button>
-          <button id="unlink_wallet" class="ghost">Unlink</button>
-        </div>
-      </article>
     </section>
 
     <section class="panel workspace-panel">
       <div class="workspace-head">
         <div>
           <p class="panel-kicker">Wallet Workspace</p>
-          <h2>Choose the wallet context you want to operate</h2>
-        </div>
-        <div class="mode-switch">
-          <button id="mode_ii" class="mode-chip is-active">Use II Wallet</button>
-          <button id="mode_phantom" class="mode-chip">Use Phantom Wallet</button>
+          <h2>Use the currently authenticated wallet session</h2>
         </div>
       </div>
 
       <p id="wallet_hint" class="support-copy">
-        II mode can manage its own derived wallet, or a linked Phantom-derived wallet after linking.
+        Sign in with Internet Identity or connect Phantom to load deposit addresses and balances.
       </p>
       <p id="pid" class="mono-copy">
-        Internet Identity principal: sign in to load your wallet.
+        No active wallet session. Sign in with Internet Identity or connect Phantom to continue.
       </p>
 
       <div class="workspace-grid">

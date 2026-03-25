@@ -44,6 +44,22 @@ let connectingPhantom = false;
 const $ = (id) => document.getElementById(id);
 const compactValueMediaQuery = window.matchMedia("(max-width: 720px)");
 const responsiveValueIds = ["pubkey", "pid", "deposit", "sol_deposit", "doge_deposit"];
+const copyButtonConfigs = {
+  copy_icp: {
+    idleLabel: "Copy ICP Address",
+    hasValue: () => Boolean(icpDepositAddress),
+  },
+  copy_sol: {
+    idleLabel: "Copy SOL Address",
+    hasValue: () => Boolean(solDepositAddress),
+  },
+  copy_doge: {
+    idleLabel: "Copy DOGE Address",
+    hasValue: () => Boolean(dogeDepositAddress),
+  },
+};
+const copyButtonFeedbackTimers = new Map();
+const copyButtonBusyIds = new Set();
 
 function setText(id, value) {
   const el = $(id);
@@ -172,10 +188,69 @@ function showMuted(message) {
   alertSet("muted", message);
 }
 
+function getDefaultButtonLabel(id) {
+  const button = $(id);
+  if (!button) {
+    return "";
+  }
+
+  if (!button.dataset.defaultLabel) {
+    button.dataset.defaultLabel = button.textContent.trim();
+  }
+
+  return button.dataset.defaultLabel;
+}
+
+function setButtonState(id, label, { disabled, busy = false } = {}) {
+  const button = $(id);
+  if (!button) {
+    return;
+  }
+
+  getDefaultButtonLabel(id);
+
+  if (label != null) {
+    button.textContent = label;
+  }
+
+  if (typeof disabled === "boolean") {
+    button.disabled = disabled;
+  }
+
+  if (busy) {
+    button.setAttribute("aria-busy", "true");
+  } else {
+    button.removeAttribute("aria-busy");
+  }
+}
+
+function clearTransferFields(...fieldIds) {
+  fieldIds.forEach((fieldId) => {
+    const field = $(fieldId);
+    if (field) {
+      field.value = "";
+    }
+  });
+}
+
 function updateCopyButtons() {
-  $("copy_icp").disabled = !icpDepositAddress;
-  $("copy_sol").disabled = !solDepositAddress;
-  $("copy_doge").disabled = !dogeDepositAddress;
+  Object.entries(copyButtonConfigs).forEach(([id, config]) => {
+    const button = $(id);
+    if (!button) {
+      return;
+    }
+
+    button.dataset.defaultLabel = config.idleLabel;
+
+    if (copyButtonBusyIds.has(id) || copyButtonFeedbackTimers.has(id)) {
+      button.disabled = true;
+      return;
+    }
+
+    button.textContent = config.idleLabel;
+    button.disabled = !config.hasValue();
+    button.removeAttribute("aria-busy");
+  });
 }
 
 function setWalletAddresses({ icp = null, sol = null, doge = null } = {}) {
@@ -877,6 +952,8 @@ async function confirmAfterTimeout(initialNonce, assetType) {
       `${assetType} transfer timed out and no nonce change was detected. Check the explorer or retry after a short wait.`
     );
   }
+
+  return success;
 }
 
 function explorerLinkForAsset(result, assetType) {
@@ -939,11 +1016,18 @@ function validatePositiveAmount(rawValue, label) {
   return parsed;
 }
 
-async function copyText(value, label) {
+async function copyText(buttonId, value, label) {
   if (!value) {
     showWarn(`No ${label} is available to copy yet.`);
     return;
   }
+
+  if (copyButtonBusyIds.has(buttonId) || copyButtonFeedbackTimers.has(buttonId)) {
+    return;
+  }
+
+  copyButtonBusyIds.add(buttonId);
+  setButtonState(buttonId, "Copying...", { disabled: true, busy: true });
 
   try {
     if (navigator.clipboard?.writeText) {
@@ -959,8 +1043,23 @@ async function copyText(value, label) {
       document.execCommand("copy");
       document.body.removeChild(input);
     }
+
+    copyButtonBusyIds.delete(buttonId);
+    const existingTimer = copyButtonFeedbackTimers.get(buttonId);
+    if (existingTimer) {
+      window.clearTimeout(existingTimer);
+    }
+
+    setButtonState(buttonId, "Copied", { disabled: true, busy: false });
+    const restoreTimer = window.setTimeout(() => {
+      copyButtonFeedbackTimers.delete(buttonId);
+      updateCopyButtons();
+    }, 1600);
+    copyButtonFeedbackTimers.set(buttonId, restoreTimer);
     showOk(`${label} copied to clipboard.`);
   } catch (error) {
+    copyButtonBusyIds.delete(buttonId);
+    updateCopyButtons();
     showErr(`Failed to copy ${label}: ${normalizeAgentError(error)}`);
   }
 }
@@ -1009,15 +1108,15 @@ $("logout").onclick = async () => {
 };
 
 $("copy_icp").onclick = async () => {
-  await copyText(icpDepositAddress, "ICP address");
+  await copyText("copy_icp", icpDepositAddress, "ICP address");
 };
 
 $("copy_sol").onclick = async () => {
-  await copyText(solDepositAddress, "SOL address");
+  await copyText("copy_sol", solDepositAddress, "SOL address");
 };
 
 $("copy_doge").onclick = async () => {
-  await copyText(dogeDepositAddress, "DOGE address");
+  await copyText("copy_doge", dogeDepositAddress, "DOGE address");
 };
 
 $("refresh_icp").onclick = async () => {
@@ -1039,10 +1138,10 @@ $("send").onclick = async () => {
   }
 
   sendingIcp = true;
-  $("send").disabled = true;
-  $("send").textContent = "Sending ICP...";
+  setButtonState("send", "Sending ICP...", { disabled: true, busy: true });
 
   let initialNonce = null;
+  let shouldClearInputs = false;
 
   try {
     const to = $("to").value.trim();
@@ -1077,6 +1176,7 @@ $("send").onclick = async () => {
       const result = await withTimeout(
         friendlyTry(() => actor.transfer_ii(to, amount), (message) => showWarn(message))
       );
+      shouldClearInputs = true;
       displayTransferResult(result, "ICP");
       await refreshBothBalances(true, true);
       showOk("ICP transfer submitted through Internet Identity mode.");
@@ -1111,6 +1211,7 @@ $("send").onclick = async () => {
           (errorMessage) => showWarn(errorMessage)
         )
       );
+      shouldClearInputs = true;
       displayTransferResult(result, "ICP");
       await refreshBothBalances(true, true);
       showOk("ICP transfer submitted through Phantom mode.");
@@ -1118,19 +1219,19 @@ $("send").onclick = async () => {
       throw new Error("Sign in with Internet Identity or connect Phantom first.");
     }
 
-    $("to").value = "";
-    $("amount").value = "";
   } catch (error) {
     const message = (error?.message || String(error || "")).toLowerCase();
     if (message.includes("timed out") || message.includes("processing")) {
-      await confirmAfterTimeout(initialNonce, "ICP");
+      shouldClearInputs = (await confirmAfterTimeout(initialNonce, "ICP")) || shouldClearInputs;
     } else if (error.message !== "Cancelled") {
       showErr(`ICP transfer failed: ${normalizeAgentError(error)}`);
     }
   } finally {
+    if (shouldClearInputs) {
+      clearTransferFields("to", "amount");
+    }
     sendingIcp = false;
-    $("send").disabled = false;
-    $("send").textContent = "Send ICP";
+    setButtonState("send", getDefaultButtonLabel("send"), { disabled: false, busy: false });
   }
 };
 
@@ -1141,10 +1242,10 @@ $("send_sol").onclick = async () => {
   }
 
   sendingSol = true;
-  $("send_sol").disabled = true;
-  $("send_sol").textContent = "Sending SOL...";
+  setButtonState("send_sol", "Sending SOL...", { disabled: true, busy: true });
 
   let initialNonce = null;
+  let shouldClearInputs = false;
 
   try {
     const to = $("to_sol").value.trim();
@@ -1182,6 +1283,7 @@ $("send_sol").onclick = async () => {
       const result = await withTimeout(
         friendlyTry(() => actor.transfer_sol_ii(to, amountLamports), (message) => showWarn(message))
       );
+      shouldClearInputs = true;
       displayTransferResult(result, "SOL");
       await refreshBothBalances(true, true);
       showOk("SOL transfer submitted through Internet Identity mode.");
@@ -1226,6 +1328,7 @@ $("send_sol").onclick = async () => {
           (errorMessage) => showWarn(errorMessage)
         )
       );
+      shouldClearInputs = true;
       displayTransferResult(result, "SOL");
       await refreshBothBalances(true, true);
       showOk("SOL transfer submitted through Phantom mode.");
@@ -1233,19 +1336,22 @@ $("send_sol").onclick = async () => {
       throw new Error("Sign in with Internet Identity or connect Phantom first.");
     }
 
-    $("to_sol").value = "";
-    $("amount_sol").value = "";
   } catch (error) {
     const message = (error?.message || String(error || "")).toLowerCase();
     if (message.includes("timed out") || message.includes("processing")) {
-      await confirmAfterTimeout(initialNonce, "SOL");
+      shouldClearInputs = (await confirmAfterTimeout(initialNonce, "SOL")) || shouldClearInputs;
     } else if (error.message !== "Cancelled") {
       showErr(`SOL transfer failed: ${normalizeAgentError(error)}`);
     }
   } finally {
+    if (shouldClearInputs) {
+      clearTransferFields("to_sol", "amount_sol");
+    }
     sendingSol = false;
-    $("send_sol").disabled = false;
-    $("send_sol").textContent = "Send SOL";
+    setButtonState("send_sol", getDefaultButtonLabel("send_sol"), {
+      disabled: false,
+      busy: false,
+    });
   }
 };
 
@@ -1256,10 +1362,10 @@ $("send_doge").onclick = async () => {
   }
 
   sendingDoge = true;
-  $("send_doge").disabled = true;
-  $("send_doge").textContent = "Sending DOGE...";
+  setButtonState("send_doge", "Sending DOGE...", { disabled: true, busy: true });
 
   let initialNonce = null;
+  let shouldClearInputs = false;
 
   try {
     const to = $("to_doge").value.trim();
@@ -1292,6 +1398,7 @@ $("send_doge").onclick = async () => {
           (message) => showWarn(message)
         )
       );
+      shouldClearInputs = true;
       displayTransferResult(result, "DOGE");
       await refreshBothBalances(true, true);
       showOk("DOGE transfer submitted through Internet Identity mode.");
@@ -1328,6 +1435,7 @@ $("send_doge").onclick = async () => {
           (errorMessage) => showWarn(errorMessage)
         )
       );
+      shouldClearInputs = true;
       displayTransferResult(result, "DOGE");
       await refreshBothBalances(true, true);
       showOk("DOGE transfer submitted through Phantom mode.");
@@ -1335,19 +1443,22 @@ $("send_doge").onclick = async () => {
       throw new Error("Sign in with Internet Identity or connect Phantom first.");
     }
 
-    $("to_doge").value = "";
-    $("amount_doge").value = "";
   } catch (error) {
     const message = (error?.message || String(error || "")).toLowerCase();
     if (message.includes("timed out") || message.includes("processing")) {
-      await confirmAfterTimeout(initialNonce, "DOGE");
+      shouldClearInputs = (await confirmAfterTimeout(initialNonce, "DOGE")) || shouldClearInputs;
     } else if (error.message !== "Cancelled") {
       showErr(`DOGE transfer failed: ${normalizeAgentError(error)}`);
     }
   } finally {
+    if (shouldClearInputs) {
+      clearTransferFields("to_doge", "amount_doge");
+    }
     sendingDoge = false;
-    $("send_doge").disabled = false;
-    $("send_doge").textContent = "Send DOGE";
+    setButtonState("send_doge", getDefaultButtonLabel("send_doge"), {
+      disabled: false,
+      busy: false,
+    });
   }
 };
 

@@ -395,6 +395,10 @@ button:disabled {
   filter: none;
 }
 
+button[aria-busy="true"] {
+  cursor: progress;
+}
+
 .primary {
   background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 42%, var(--violet) 100%);
   color: #ffffff;

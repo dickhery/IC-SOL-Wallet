@@ -1,0 +1,21 @@
+{
+  "name": "IC Phantom",
+  "short_name": "IC Phantom",
+  "description": "Secure crypto wallet for ICP, SOL, and DOGE using Internet Identity or Phantom.",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#090d25",
+  "theme_color": "#090d25",
+  "icons": [
+    {
+      "src": "ic-phantom-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "ic-phantom-favicon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

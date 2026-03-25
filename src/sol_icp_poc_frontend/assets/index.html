@@ -3,7 +3,61 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>IC Multi Wallet</title>
+  <title>IC Phantom</title>
+  <meta
+    name="description"
+    content="IC Phantom is a secure crypto wallet for ICP, SOL, and DOGE with one workspace for Internet Identity and Phantom sessions."
+  />
+  <meta name="application-name" content="IC Phantom" />
+  <meta name="apple-mobile-web-app-title" content="IC Phantom" />
+  <meta name="theme-color" content="#090d25" />
+  <link rel="canonical" href="https://hbxmr-wyaaa-aaaap-an3ia-cai.icp0.io/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="IC Phantom" />
+  <meta property="og:url" content="https://hbxmr-wyaaa-aaaap-an3ia-cai.icp0.io/" />
+  <meta property="og:title" content="IC Phantom Wallet for ICP, SOL, and DOGE" />
+  <meta
+    property="og:description"
+    content="Secure crypto wallet for ICP, SOL, and DOGE with Internet Identity and Phantom working from one polished command center."
+  />
+  <meta
+    property="og:image"
+    content="https://hbxmr-wyaaa-aaaap-an3ia-cai.icp0.io/ic-phantom-link-preview.jpeg"
+  />
+  <meta
+    property="og:image:url"
+    content="https://hbxmr-wyaaa-aaaap-an3ia-cai.icp0.io/ic-phantom-link-preview.jpeg"
+  />
+  <meta
+    property="og:image:secure_url"
+    content="https://hbxmr-wyaaa-aaaap-an3ia-cai.icp0.io/ic-phantom-link-preview.jpeg"
+  />
+  <meta property="og:image:type" content="image/jpeg" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta
+    property="og:image:alt"
+    content="IC Phantom wallet artwork featuring Internet Identity, Phantom, and multi-chain token controls."
+  />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="IC Phantom Wallet for ICP, SOL, and DOGE" />
+  <meta
+    name="twitter:description"
+    content="A secure neon-styled wallet workspace for ICP, SOL, and DOGE powered by Internet Identity and Phantom."
+  />
+  <meta
+    name="twitter:image"
+    content="https://hbxmr-wyaaa-aaaap-an3ia-cai.icp0.io/ic-phantom-link-preview.jpeg"
+  />
+  <meta
+    name="twitter:image:alt"
+    content="IC Phantom wallet artwork featuring Internet Identity, Phantom, and multi-chain token controls."
+  />
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="ic-phantom-favicon.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
+  <link rel="manifest" href="site.webmanifest" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -12,26 +66,40 @@
 
   <main class="app-shell">
     <section class="hero-card">
-      <p class="eyebrow">Hybrid custody wallet</p>
-      <div class="hero-copy">
-        <div>
-          <h1>Run one wallet experience across Internet Identity and Phantom.</h1>
-          <p class="lede">
-            Authenticate with Internet Identity or connect Phantom, then hold and transfer ICP
-            and SOL from the same app. DOGE now rides alongside them through the same single-session
-            wallet flow. Only one authentication method stays active at a time.
-          </p>
+      <div class="hero-brand">
+        <img class="hero-logo" src="ic-phantom-favicon.png" alt="IC Phantom logo" />
+        <div class="brand-copy">
+          <p class="eyebrow">IC Phantom</p>
+          <p class="hero-tagline">Secure crypto wallet for ICP, SOL, and DOGE</p>
         </div>
-        <div class="status-dock">
-          <div class="status-pill">
-            <span class="label">II Session</span>
-            <span id="ii_badge" class="status-badge muted">Offline</span>
+      </div>
+      <div class="hero-copy">
+        <div class="hero-text">
+          <div>
+            <h1>One mission control for Internet Identity and Phantom.</h1>
+            <p class="lede">
+              IC Phantom brings ICP, SOL, and DOGE into one polished command center. Sign in with
+              Internet Identity or connect Phantom, then manage deposits, balances, and transfers
+              with one active session at a time.
+            </p>
           </div>
-          <div class="status-pill">
-            <span class="label">Phantom</span>
-            <span id="phantom_badge" class="status-badge muted">Offline</span>
+          <div class="hero-chips" aria-label="IC Phantom highlights">
+            <span class="hero-chip">ICP + SOL + DOGE</span>
+            <span class="hero-chip">Internet Identity</span>
+            <span class="hero-chip">Phantom</span>
+            <span class="hero-chip">Single active session</span>
           </div>
-          <p id="mode_status" class="mode-status">Active wallet: no session connected</p>
+          <div class="status-dock">
+            <div class="status-pill">
+              <span class="label">II Session</span>
+              <span id="ii_badge" class="status-badge muted">Offline</span>
+            </div>
+            <div class="status-pill">
+              <span class="label">Phantom</span>
+              <span id="phantom_badge" class="status-badge muted">Offline</span>
+            </div>
+            <p id="mode_status" class="mode-status">Active wallet: no session connected</p>
+          </div>
         </div>
       </div>
     </section>
@@ -40,12 +108,12 @@
       <article class="panel auth-panel">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Authentication</p>
+            <p class="panel-kicker">Identity Rail</p>
             <h2>Internet Identity</h2>
           </div>
         </div>
         <p id="ii_status" class="support-copy">
-          Sign in with Internet Identity to unlock the II-managed wallet.
+          Sign in with Internet Identity to unlock the IC Phantom wallet profile managed by II.
         </p>
         <div class="button-row">
           <button id="ii_login" class="primary">Login with Internet Identity</button>
@@ -56,11 +124,13 @@
       <article class="panel auth-panel">
         <div class="panel-head">
           <div>
-            <p class="panel-kicker">Wallet Connection</p>
+            <p class="panel-kicker">Wallet Rail</p>
             <h2>Phantom</h2>
           </div>
         </div>
-        <p id="status" class="support-copy">Connect Phantom to unlock the Phantom-managed wallet.</p>
+        <p id="status" class="support-copy">
+          Connect Phantom to unlock the IC Phantom wallet profile managed by your Solana key.
+        </p>
         <p id="phantom_mobile_hint" class="support-copy auth-note">
           On mobile, the Phantom flow opens this dapp inside Phantom's in-app browser.
         </p>
@@ -75,20 +145,21 @@
     <section class="panel workspace-panel">
       <div class="workspace-head">
         <div>
-          <p class="panel-kicker">Wallet Workspace</p>
-          <h2>Use the currently authenticated wallet session</h2>
+          <p class="panel-kicker">Mission Control</p>
+          <h2>Operate with the currently authenticated wallet session</h2>
         </div>
       </div>
 
       <p id="wallet_hint" class="support-copy">
-        Sign in with Internet Identity or connect Phantom to load your ICP, SOL, and DOGE wallet rails.
+        Sign in with Internet Identity or connect Phantom to load your ICP, SOL, and DOGE wallet
+        rails.
       </p>
       <p id="pid" class="mono-copy">
         No active wallet session. Sign in with Internet Identity or connect Phantom to continue.
       </p>
 
       <div class="workspace-grid">
-        <article class="token-card">
+        <article class="token-card icp-card">
           <div class="token-head">
             <div>
               <p class="token-label">ICP rail</p>
@@ -127,7 +198,7 @@
           <button id="send" class="primary">Send ICP</button>
         </article>
 
-        <article class="token-card">
+        <article class="token-card sol-card">
           <div class="token-head">
             <div>
               <p class="token-label">SOL rail</p>
@@ -213,14 +284,14 @@
 
     <section class="feedback-grid">
       <article class="panel">
-        <p class="panel-kicker">Network Feedback</p>
-        <h2>Live activity</h2>
+        <p class="panel-kicker">Network Pulse</p>
+        <h2>Latest transaction</h2>
         <div id="latest-tx" class="transaction-card muted">No transactions yet.</div>
       </article>
 
       <article class="panel">
-        <p class="panel-kicker">Status</p>
-        <h2>Operator notices</h2>
+        <p class="panel-kicker">Command Feed</p>
+        <h2>System notices</h2>
         <div id="alerts" class="notice muted">Ready.</div>
       </article>
     </section>

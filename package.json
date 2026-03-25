@@ -1,6 +1,7 @@
 {
   "name": "sol_icp_poc",
   "version": "1.0.0",
+  "description": "IC Phantom canister project",
   "dependencies": {
     "@dfinity/agent": "^3.1.0"
   },

@@ -47,15 +47,15 @@ const responsiveValueIds = ["pubkey", "pid", "deposit", "sol_deposit", "doge_dep
 const copyButtonConfigs = {
   copy_icp: {
     idleLabel: "Copy ICP Address",
-    hasValue: () => Boolean(icpDepositAddress),
+    hasValue: () => Boolean(normalizeCopyValue(icpDepositAddress)),
   },
   copy_sol: {
     idleLabel: "Copy SOL Address",
-    hasValue: () => Boolean(solDepositAddress),
+    hasValue: () => Boolean(normalizeCopyValue(solDepositAddress)),
   },
   copy_doge: {
     idleLabel: "Copy DOGE Address",
-    hasValue: () => Boolean(dogeDepositAddress),
+    hasValue: () => Boolean(normalizeCopyValue(dogeDepositAddress)),
   },
 };
 const copyButtonFeedbackTimers = new Map();
@@ -251,6 +251,80 @@ function updateCopyButtons() {
     button.disabled = !config.hasValue();
     button.removeAttribute("aria-busy");
   });
+}
+
+function normalizeCopyValue(value) {
+  if (value == null) {
+    return "";
+  }
+  return String(value).trim();
+}
+
+function legacyCopyText(value) {
+  const input = document.createElement("textarea");
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const selection = document.getSelection();
+  const savedRanges = [];
+
+  if (selection) {
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      savedRanges.push(selection.getRangeAt(index).cloneRange());
+    }
+  }
+
+  input.value = value;
+  input.setAttribute("readonly", "");
+  input.setAttribute("aria-hidden", "true");
+  input.style.position = "fixed";
+  input.style.top = "0";
+  input.style.left = "0";
+  input.style.opacity = "0";
+  input.style.pointerEvents = "none";
+  document.body.appendChild(input);
+
+  try {
+    input.focus();
+    input.select();
+    input.setSelectionRange(0, input.value.length);
+
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("Clipboard access was blocked.");
+    }
+  } finally {
+    document.body.removeChild(input);
+
+    if (selection) {
+      selection.removeAllRanges();
+      savedRanges.forEach((range) => selection.addRange(range));
+    }
+
+    activeElement?.focus?.();
+  }
+}
+
+async function writeClipboardValue(value) {
+  const normalizedValue = normalizeCopyValue(value);
+  if (!normalizedValue) {
+    throw new Error("No value is available to copy.");
+  }
+
+  let asyncClipboardError = null;
+
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(normalizedValue);
+      return;
+    } catch (error) {
+      asyncClipboardError = error;
+    }
+  }
+
+  try {
+    legacyCopyText(normalizedValue);
+  } catch (legacyError) {
+    throw asyncClipboardError ?? legacyError;
+  }
 }
 
 function setWalletAddresses({ icp = null, sol = null, doge = null } = {}) {
@@ -1017,7 +1091,8 @@ function validatePositiveAmount(rawValue, label) {
 }
 
 async function copyText(buttonId, value, label) {
-  if (!value) {
+  const normalizedValue = normalizeCopyValue(value);
+  if (!normalizedValue) {
     showWarn(`No ${label} is available to copy yet.`);
     return;
   }
@@ -1030,19 +1105,7 @@ async function copyText(buttonId, value, label) {
   setButtonState(buttonId, "Copying...", { disabled: true, busy: true });
 
   try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value);
-    } else {
-      const input = document.createElement("textarea");
-      input.value = value;
-      input.setAttribute("readonly", "");
-      input.style.position = "absolute";
-      input.style.left = "-9999px";
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand("copy");
-      document.body.removeChild(input);
-    }
+    await writeClipboardValue(normalizedValue);
 
     copyButtonBusyIds.delete(buttonId);
     const existingTimer = copyButtonFeedbackTimers.get(buttonId);
